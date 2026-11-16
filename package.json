@@ -1,0 +1,16 @@
+{
+  "name": "robot-warriors-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Motor de simulação e cérebro programável do Robot Warriors — vitrine de código",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "duel": "bun examples/duel.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^5.9.0"
+  }
+}
