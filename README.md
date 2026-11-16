@@ -86,7 +86,7 @@ Além deste motor, o Robot Warriors em produção tem:
 ## Autor
 
 **Humberto Cruz**: desenvolvedor full-stack (Next.js, Node, Prisma).
-[LinkedIn](https://www.linkedin.com/in/SEU-PERFIL) · [robotwarriors.app](https://www.robotwarriors.app)
+[LinkedIn](https://www.linkedin.com/in/humbertocruz-dev/) · [robotwarriors.app](https://www.robotwarriors.app)
 
 ---
 
