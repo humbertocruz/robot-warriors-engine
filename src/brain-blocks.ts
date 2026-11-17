@@ -2,7 +2,7 @@
 // Dados puros (JSON): dá para salvar, exportar e compartilhar. O interpretador é determinístico
 // (sem Math.random / Date.now), então a mesma luta com os mesmos cérebros sempre dá o mesmo resultado.
 import { clearance, lineOfSight, type Pt } from "./arenas";
-import { angDiff, BOOST, dazeError, dist, emptyInput, isBroken, weaponAim, type Input, type Match, type Robot } from "./engine";
+import { angDiff, BOOST, dazeError, dist, emptyInput, isBroken, mountPoint, weaponAim, type Input, type Match, type Robot } from "./engine";
 import { isSupport, REPAIR_CAP } from "./parts";
 
 // ---------- sensores ----------
@@ -10,7 +10,7 @@ export type SensorId =
   | "dist" | "angle" | "side" | "myHp" | "foeHp" | "myEn" | "foeEn"
   | "wall" | "hazard" | "sight" | "turbo" | "burning" | "time"
   | "ready1" | "ready2" | "ready3" | "range1" | "range2" | "range3" | "behind"
-  | "missile" | "foeShield" | "foeRepair" | "repairLeft" | "int1" | "int2" | "int3" | "dazed";
+  | "missile" | "foeShield" | "foeRepair" | "repairLeft" | "int1" | "int2" | "int3" | "dazed" | "myMines";
 
 export interface SensorDef {
   id: SensorId;
@@ -23,37 +23,44 @@ export interface SensorDef {
   /** valor sugerido ao criar a condição */
   def: number;
   hint: string;
+  /** grupo no menu do editor */
+  group: SensorGroup;
 }
 
+export type SensorGroup = "Inimigo" | "Eu" | "Armas" | "Defesas" | "Arena";
+/** Ordem dos grupos no menu de sensores. */
+export const SENSOR_GROUPS: readonly SensorGroup[] = ["Inimigo", "Eu", "Armas", "Defesas", "Arena"];
+
 export const SENSORS: SensorDef[] = [
-  { id: "dist", label: "Distância do inimigo", kind: "num", unit: "px", min: 0, max: 1200, step: 10, def: 150, hint: "Entre as bordas dos dois robôs." },
-  { id: "angle", label: "Inimigo fora da frente", kind: "num", unit: "°", min: 0, max: 180, step: 5, def: 30, hint: "0° = de frente para ele; 180° = ele está atrás." },
-  { id: "side", label: "Lado do inimigo", kind: "num", unit: "°", min: -180, max: 180, step: 5, def: 0, hint: "Positivo = à direita, negativo = à esquerda." },
-  { id: "myHp", label: "Minha vida", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Percentual da vida máxima." },
-  { id: "foeHp", label: "Vida do inimigo", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Percentual da vida máxima." },
-  { id: "myEn", label: "Minha energia", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Armas e turbo gastam energia." },
-  { id: "foeEn", label: "Energia do inimigo", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Sem energia ele não ataca nem usa turbo." },
-  { id: "wall", label: "Distância da parede", kind: "num", unit: "px", min: 0, max: 600, step: 10, def: 80, hint: "Até a parede ou obstáculo mais próximo." },
-  { id: "hazard", label: "Distância de espinho/fogo", kind: "num", unit: "px", min: 0, max: 600, step: 10, def: 100, hint: "Espinhos sempre; vents só quando avisam ou ativam." },
-  { id: "sight", label: "Vejo o inimigo", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Há linha reta livre até ele?" },
-  { id: "turbo", label: "Turbo pronto", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Recarregado e com energia." },
-  { id: "burning", label: "Estou pegando fogo", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "" },
-  { id: "time", label: "Tempo restante", kind: "num", unit: "s", min: 0, max: 99, step: 5, def: 20, hint: "Segundos até o fim da luta." },
-  { id: "ready1", label: "Arma 1 pronta", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Fora de recarga e com energia." },
-  { id: "ready2", label: "Arma 2 pronta", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Fora de recarga e com energia." },
-  { id: "ready3", label: "Arma 3 pronta", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Fora de recarga e com energia." },
-  { id: "range1", label: "Inimigo ao alcance da arma 1", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta." },
-  { id: "range2", label: "Inimigo ao alcance da arma 2", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta." },
-  { id: "range3", label: "Inimigo ao alcance da arma 3", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta." },
-  { id: "behind", label: "Inimigo atrás de mim", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Mais de 135° fora da frente: bom para armas na traseira." },
-  { id: "missile", label: "Míssil vindo em mim", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Um míssil do inimigo a menos de 350px, vindo na minha direção." },
-  { id: "foeShield", label: "Inimigo com escudo ligado", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "" },
-  { id: "foeRepair", label: "Inimigo consertando", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Enquanto conserta ele anda devagar." },
-  { id: "repairLeft", label: "Reparo restante", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 50, hint: "Quanto do limite de conserto da luta ainda sobra (0 sem Kit de Reparo)." },
-  { id: "int1", label: "Arma 1 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada." },
-  { id: "int2", label: "Arma 2 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada." },
-  { id: "dazed", label: "Estou desnorteado", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Levei um Pulso Desnorteador: distância, ângulo e lado do inimigo estão errados." },
-  { id: "int3", label: "Arma 3 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada." },
+  { id: "dist", label: "Distância do inimigo", kind: "num", unit: "px", min: 0, max: 1200, step: 10, def: 150, hint: "Entre as bordas dos dois robôs.", group: "Inimigo" },
+  { id: "angle", label: "Inimigo fora da frente", kind: "num", unit: "°", min: 0, max: 180, step: 5, def: 30, hint: "0° = de frente para ele; 180° = ele está atrás.", group: "Inimigo" },
+  { id: "side", label: "Lado do inimigo", kind: "num", unit: "°", min: -180, max: 180, step: 5, def: 0, hint: "Positivo = à direita, negativo = à esquerda.", group: "Inimigo" },
+  { id: "myHp", label: "Minha vida", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Percentual da vida máxima.", group: "Eu" },
+  { id: "foeHp", label: "Vida do inimigo", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Percentual da vida máxima.", group: "Inimigo" },
+  { id: "myEn", label: "Minha energia", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Armas e turbo gastam energia.", group: "Eu" },
+  { id: "foeEn", label: "Energia do inimigo", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 30, hint: "Sem energia ele não ataca nem usa turbo.", group: "Inimigo" },
+  { id: "wall", label: "Distância da parede", kind: "num", unit: "px", min: 0, max: 600, step: 10, def: 80, hint: "Até a parede ou obstáculo mais próximo.", group: "Arena" },
+  { id: "hazard", label: "Distância de perigo (espinho, fogo, mina)", kind: "num", unit: "px", min: 0, max: 600, step: 10, def: 100, hint: "Espinhos sempre; vents só quando avisam ou ativam; minas armadas (inclusive as suas).", group: "Arena" },
+  { id: "sight", label: "Vejo o inimigo", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Há linha reta livre até ele?", group: "Inimigo" },
+  { id: "turbo", label: "Turbo pronto", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Recarregado e com energia.", group: "Eu" },
+  { id: "burning", label: "Estou pegando fogo", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "", group: "Eu" },
+  { id: "time", label: "Tempo restante", kind: "num", unit: "s", min: 0, max: 99, step: 5, def: 20, hint: "Segundos até o fim da luta.", group: "Arena" },
+  { id: "ready1", label: "Arma 1 pronta", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Fora de recarga e com energia.", group: "Armas" },
+  { id: "ready2", label: "Arma 2 pronta", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Fora de recarga e com energia.", group: "Armas" },
+  { id: "ready3", label: "Arma 3 pronta", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Fora de recarga e com energia.", group: "Armas" },
+  { id: "range1", label: "Inimigo ao alcance da arma 1", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta.", group: "Armas" },
+  { id: "range2", label: "Inimigo ao alcance da arma 2", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta.", group: "Armas" },
+  { id: "range3", label: "Inimigo ao alcance da arma 3", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta.", group: "Armas" },
+  { id: "behind", label: "Inimigo atrás de mim", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Mais de 135° fora da frente: bom para armas na traseira.", group: "Inimigo" },
+  { id: "missile", label: "Míssil vindo em mim", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Um míssil do inimigo a menos de 350px, vindo na minha direção.", group: "Defesas" },
+  { id: "foeShield", label: "Inimigo com escudo ligado", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "", group: "Defesas" },
+  { id: "foeRepair", label: "Inimigo consertando", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Enquanto conserta ele anda devagar.", group: "Defesas" },
+  { id: "repairLeft", label: "Reparo restante", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 50, hint: "Quanto do limite de conserto da luta ainda sobra (0 sem Kit de Reparo).", group: "Defesas" },
+  { id: "int1", label: "Arma 1 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada.", group: "Armas" },
+  { id: "int2", label: "Arma 2 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada.", group: "Armas" },
+  { id: "dazed", label: "Estou desnorteado", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Levei um Pulso Desnorteador: distância, ângulo e lado do inimigo estão errados.", group: "Eu" },
+  { id: "int3", label: "Arma 3 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada.", group: "Armas" },
+  { id: "myMines", label: "Minhas minas ativas", kind: "num", min: 0, max: 3, step: 1, def: 2, hint: "Minas do Lança-minas no chão (até 3). A 4ª faz a mais antiga sumir.", group: "Armas" },
 ];
 export const sensorById = Object.fromEntries(SENSORS.map((s) => [s.id, s])) as Record<SensorId, SensorDef>;
 
@@ -121,13 +128,24 @@ const mk = (name: string, rules: [Cond[], Act[]][]): Program => ({
 const C = (s: SensorId, op: Op, v: number): Cond => ({ s, op, v });
 const A = (a: ActionId, v = actionById[a].def): Act => ({ a, v });
 
+/** As 3 regras do guia do primeiro cérebro, na ordem em que o jogador as adiciona.
+ *  Juntas vencem o Tonto (o robô do jogador com a IA 0,15) na maioria das arenas: ver tests/editor-cerebro.test.ts. */
+export function guideRules(): Rule[] {
+  return [
+    { id: newId(), on: true, conds: [{ s: "hazard", op: "<", v: 90 }], acts: [{ a: "escape", v: 0 }] },
+    { id: newId(), on: true, conds: [{ s: "range1", op: "=", v: 1 }], acts: [{ a: "fire", v: 0 }] },
+    { id: newId(), on: true, conds: [], acts: [{ a: "approach", v: 0 }] },
+  ];
+}
+/** Dificuldade da IA do Tonto, o adversário do fim do guia. */
+export const GUIDE_FOE_DIFFICULTY = 0.15;
+
 export const TEMPLATES: { name: string; desc: string; make: () => Program }[] = [
   {
     name: "Lutador",
-    desc: "Parte para cima e ataca com tudo. Foge só quando está quase morto.",
+    desc: "Parte para cima e ataca com tudo, sem recuar.",
     make: () => mk("Lutador", [
       [[C("hazard", "<", 90)], [A("escape")]],
-      [[C("myHp", "<", 25), C("dist", "<", 200)], [A("flee"), A("boost")]],
       [[C("range1", "=", 1)], [A("fire", 1)]],
       [[C("range2", "=", 1)], [A("fire", 2)]],
       [[C("range3", "=", 1)], [A("fire", 3)]],
@@ -137,25 +155,53 @@ export const TEMPLATES: { name: string; desc: string; make: () => Program }[] = 
   },
   {
     name: "Atirador",
-    desc: "Mantém distância e dispara de longe; foge quando o inimigo chega perto.",
+    desc: "Fica longe e dispara. Se o inimigo encosta, para e briga; se ele não vem, vai atrás.",
     make: () => mk("Atirador", [
       [[C("hazard", "<", 90)], [A("escape")]],
-      [[C("dist", "<", 140), C("turbo", "=", 1)], [A("flee"), A("boost")]],
-      [[C("angle", "<", 15)], [A("fire", 0)]],
-      [[C("dist", "<", 180)], [A("keep", 320)]],
+      [[C("range1", "=", 1)], [A("fire", 1)]],
+      [[C("range2", "=", 1)], [A("fire", 2)]],
+      [[C("range3", "=", 1)], [A("fire", 3)]],
+      [[C("dist", "<", 150)], [A("aim")]],
+      [[C("time", "<", 60)], [A("approach")]],
       [[], [A("keep", 320)]],
     ]),
   },
   {
     name: "Toureiro",
-    desc: "Orbita o inimigo, ataca de lado e usa o turbo para escapar de encostos.",
+    desc: "Rodeia o inimigo a meia distância e investe de turbo quando dá.",
     make: () => mk("Toureiro", [
       [[C("hazard", "<", 90)], [A("escape")]],
-      [[C("dist", "<", 90), C("turbo", "=", 1)], [A("flee"), A("boost")]],
       [[C("range1", "=", 1)], [A("fire", 1)]],
       [[C("range2", "=", 1)], [A("fire", 2)]],
       [[C("range3", "=", 1)], [A("fire", 3)]],
-      [[C("dist", "<", 260)], [A("circle", 1)]],
+      [[C("dist", "<", 90)], [A("approach")]],
+      [[C("dist", "<", 260), C("turbo", "=", 1), C("angle", "<", 20)], [A("approach"), A("boost")]],
+      [[C("dist", "<", 260), C("angle", "<", 60)], [A("circle", 1)]],
+      [[], [A("approach")]],
+    ]),
+  },
+  {
+    name: "Guardião",
+    desc: "Liga o escudo quando o inimigo encosta e se conserta quando está longe e machucado.",
+    make: () => mk("Guardião", [
+      [[C("hazard", "<", 90)], [A("escape")]],
+      [[C("myHp", "<", 55), C("repairLeft", ">", 5), C("dist", ">", 110)], [A("repair"), A("flee")]],
+      [[C("int1", "<", 30), C("repairLeft", ">", 5), C("dist", ">", 110)], [A("repair"), A("flee")]],
+      [[C("myHp", "<", 45), C("repairLeft", ">", 5), C("turbo", "=", 1)], [A("flee"), A("boost")]],
+      [[C("dist", "<", 120), C("angle", "<", 60)], [A("shield")]],
+      [[C("range1", "=", 1)], [A("fire", 1)]],
+      [[], [A("approach")]],
+    ]),
+  },
+  {
+    name: "Traseiro",
+    desc: "Chega de frente e, colado, gira para usar a arma de trás.",
+    make: () => mk("Traseiro", [
+      [[C("hazard", "<", 90)], [A("escape")]],
+      [[C("range1", "=", 1)], [A("fire", 1)]],
+      [[C("range2", "=", 1)], [A("fire", 2)]],
+      [[C("range3", "=", 1)], [A("fire", 3)]],
+      [[C("dist", "<", 100)], [A("aimWith", 2)]],
       [[], [A("approach")]],
     ]),
   },
@@ -178,6 +224,7 @@ function nearestHazard(m: Match, me: Robot): { d: number; x: number; y: number }
     if (!best || d < best.d) best = { d, x, y };
   };
   for (const z of m.arena.spikes) consider(z.x, z.y, z.r);
+  for (const mi of m.mines) if (mi.armed) consider(mi.x, mi.y, 12);
   m.arena.vents.forEach((v, i) => {
     const st = m.vent(i);
     if (st.warn || st.active) consider(v.x, v.y, v.r);
@@ -185,20 +232,29 @@ function nearestHazard(m: Match, me: Robot): { d: number; x: number; y: number }
   return best;
 }
 
-function weaponInRange(me: Robot, foe: Robot, i: number, toFoe: number): boolean {
+/** A arma `i` acerta o inimigo (na posição em que eu acho que ele está) daqui? Mesma conta do motor, medida do ponto da arma. */
+function weaponInRange(me: Robot, foe: Robot, i: number, toFoe: number, d: number): boolean {
   const ws = me.weapons[i];
-  if (!ws) return false;
+  if (!ws || isBroken(ws)) return false;
   const w = ws.def;
-  const edge = dist(me, foe) - foe.stats.radius - me.stats.radius;
-  const facing = Math.abs(angDiff(toFoe, weaponAim(me, i)));
+  const fx = me.x + Math.cos(toFoe) * d, fy = me.y + Math.sin(toFoe) * d; // onde eu acho que ele está
+  const mp = mountPoint(me, i);
+  const dmc = Math.hypot(fx - mp.x, fy - mp.y);
+  const dm = dmc - foe.stats.radius;
+  const facing = Math.abs(angDiff(Math.atan2(fy - mp.y, fx - mp.x), weaponAim(me, i)));
+  const tol = Math.atan2(foe.stats.radius, Math.max(dmc, 1)) * 0.8;
   switch (w.kind) {
-    case "saw": case "drill": return edge < w.range - 6 && facing < 0.8;
-    case "flame": return edge < w.range - 20 && facing < 0.5;
-    case "shock": return edge < w.range - 10;
-    case "hammer": case "flipper": return edge < w.range - 6 && facing < 0.5;
-    case "missile": return facing < 0.25 && dist(me, foe) > 120;
-    case "disruptor": return edge < w.range - 10 && facing < 0.5;
-    default: return false; // passivas (espinhos) não têm gatilho
+    case "saw": case "drill": return dm < w.range + 8 && facing < w.arc + tol + 0.15;
+    case "flame": return dm < w.range - 4 && facing < w.arc + tol;
+    case "shock": return d - foe.stats.radius - me.stats.radius < w.range - 10;
+    case "hammer": case "flipper": case "disruptor": return dm < w.range * 0.95 && facing < w.arc + tol;
+    case "missile": return facing < 0.25 && d > 120;
+    case "mines": {
+      // o inimigo está perto de onde a mina vai cair
+      const reach = w.power ?? 70, aim = weaponAim(me, i);
+      return Math.hypot(fx - (mp.x + Math.cos(aim) * reach), fy - (mp.y + Math.sin(aim) * reach)) < 110 + foe.stats.radius;
+    }
+    default: return false; // passivas (espinhos) e defesas não têm gatilho de alcance
   }
 }
 
@@ -229,9 +285,9 @@ export function readSensors(m: Match, me: Robot, foe: Robot): { s: Sensors; ctx:
     burning: me.burn > 0 ? 1 : 0,
     time: m.time,
     ready1: ready(0), ready2: ready(1), ready3: ready(2),
-    range1: weaponInRange(me, foe, 0, toFoe) ? 1 : 0,
-    range2: weaponInRange(me, foe, 1, toFoe) ? 1 : 0,
-    range3: weaponInRange(me, foe, 2, toFoe) ? 1 : 0,
+    range1: weaponInRange(me, foe, 0, toFoe, d) ? 1 : 0,
+    range2: weaponInRange(me, foe, 1, toFoe, d) ? 1 : 0,
+    range3: weaponInRange(me, foe, 2, toFoe, d) ? 1 : 0,
     behind: Math.abs(rel) > (Math.PI * 3) / 4 ? 1 : 0,
     missile: m.missiles.some((mi) => {
       if (mi.owner === me.id) return false;
@@ -245,6 +301,7 @@ export function readSensors(m: Match, me: Robot, foe: Robot): { s: Sensors; ctx:
     int2: me.weapons[1]?.integrity ?? 0,
     int3: me.weapons[2]?.integrity ?? 0,
     dazed: me.dazed > 0 ? 1 : 0,
+    myMines: m.mines.reduce((n, mi) => n + (mi.owner === me.id ? 1 : 0), 0),
   };
   return { s, ctx: { m, me, foe, toFoe, dist: d, hazard: hz } };
 }
@@ -398,10 +455,14 @@ export class ProgramBrain {
 
   /** Contorna paredes e obstáculos (físico, não é estratégia): testa à frente e escolhe um lado fixo por um tempo. */
   private steer(c: Ctx, heading: number, dt: number): number {
-    const { m, me } = c;
+    const { m, me, toFoe, dist: foeDist } = c;
     const need = me.stats.radius + 6;
-    const reach = 110;
-    const free = (a: number) => [55, reach].every((r) => clearance(m.arena, m.walls, { x: me.x + Math.cos(a) * r, y: me.y + Math.sin(a) * r }) > need);
+    // indo na direção do inimigo, só olha até ele: a parede atrás dele não é obstáculo
+    const towardFoe = Math.abs(angDiff(heading, toFoe)) < 0.5;
+    const reach = towardFoe ? Math.min(110, foeDist - 20) : 110;
+    if (reach < 30 && towardFoe) return heading;
+    const probes = reach < 55 ? [reach] : [55, reach];
+    const free = (a: number) => probes.every((r) => clearance(m.arena, m.walls, { x: me.x + Math.cos(a) * r, y: me.y + Math.sin(a) * r }) > need);
     this.sideT -= dt;
     if (free(heading) && this.sideT <= 0) return heading;
     if (this.sideT <= 0) {
@@ -473,7 +534,7 @@ export function importProgram(code: string): Program | null {
 // ---------- link de compartilhamento ----------
 const HASH_KEY = "cerebro=";
 /** Endereço público do jogo: o link compartilhado sempre aponta para ele (previews da Vercel exigem login). */
-export const PUBLIC_URL = "https://robot-warriors.vercel.app/";
+export const PUBLIC_URL = "https://www.robotwarriors.app/";
 
 /** Link que abre o jogo já com este cérebro. Vai no fragmento (#), que não é enviado a servidor nenhum. */
 export function shareLink(p: Program, base = PUBLIC_URL): string {

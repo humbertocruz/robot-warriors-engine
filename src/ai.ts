@@ -90,6 +90,15 @@ export class Brain {
         case "flipper": want = dm < w.range && facing < 0.6 && ws.cd <= 0; break;
         case "missile": want = !hidden && facing < 0.25 + (1 - this.diff) * 0.3 && d > 120 && ws.cd <= 0; break;
         case "disruptor": want = dm < w.range - 10 && facing < 0.5 && ws.cd <= 0 && foe.dazed <= 0; break;
+        // mina: solta onde o inimigo vai passar (perto do ponto de queda), ou atrás quando foge
+        case "mines": {
+          const reach = w.power ?? 70;
+          const lx = mp.x + Math.cos(weaponAim(me, i)) * reach, ly = mp.y + Math.sin(weaponAim(me, i)) * reach;
+          const close = Math.hypot(foe.x - lx, foe.y - ly) < 150 + foe.stats.radius;
+          const mine = m.mines.filter((mi) => mi.owner === me.id).length;
+          want = ws.cd <= 0 && (close || (this.retreat > 0 && facing > 2.2)) && (mine < 3 || this.diff > 0.6);
+          break;
+        }
         // fumaça para fugir de mísseis ou quando está apanhando
         case "smoke": {
           // antes do míssil sair: inimigo com lança-mísseis, longe e mirando em mim
@@ -141,6 +150,12 @@ export class Brain {
 
   private hazardAvoid(m: Match, me: Robot): number | null {
     const rad = me.stats.radius;
+    // minas armadas (as dele e as do inimigo): IAs fracas às vezes nem percebem
+    if (this.diff > 0.2) {
+      for (const mi of m.mines) {
+        if (mi.armed && Math.hypot(me.x - mi.x, me.y - mi.y) < rad + 12 + 26 + 40 * this.diff) return Math.atan2(me.y - mi.y, me.x - mi.x);
+      }
+    }
     for (const z of m.arena.spikes) {
       if (Math.hypot(me.x - z.x, me.y - z.y) < z.r + rad + 40 * this.diff) return Math.atan2(me.y - z.y, me.x - z.x);
     }
