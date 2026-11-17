@@ -1,6 +1,6 @@
 // Simulação pura (sem render). Emite eventos de efeito para o renderer (PixiJS).
-import { buildStats, levelOf, scaledWeapon, weaponById, type BuildStats, type RobotBuild, type Weapon } from "./parts";
-import { arenaById, closestOnSegment, isOpen, ventState, wallSegments, type ArenaDef, type Pt } from "./arenas";
+import { buildStats, equippedWeapons, levelOf, mulberry, REPAIR_CAP, scaledWeapon, slotLayout, WEAPON_HP, WEAPON_SHARE, weaponById, type BuildStats, type Mount, type RobotBuild, type Weapon } from "./parts";
+import { arenaById, closestOnSegment, isOpen, lineOfSight, ventState, wallSegments, type ArenaDef, type Pt } from "./arenas";
 const STEP = 1 / 60;
 const MATCH_TIME = 99;
 
@@ -16,6 +16,9 @@ export interface Input {
 }
 export const emptyInput = (): Input => ({ throttle: 0, turn: 0, heading: null, headingMag: 0, fire: [false, false, false], boost: false });
 
+/** Segundos depois de sair do desnorteio em que um robô não pode ser desnorteado de novo. */
+export const DAZE_IMMUNITY = 3;
+
 export const BOOST = { energy: 25, cooldown: 2.2, duration: 0.35, power: 1.6 };
 /** Quanto tempo o robô dá ré antes de fazer meia-volta e seguir de frente. */
 export const REVERSE_TIME = 0.45;
@@ -28,7 +31,16 @@ export interface WeaponState {
   prevFire: boolean;
   pendingHit: number; // tempo até o golpe do martelo conectar
   hitT: number; // segundos desde o último contato da arma (som de corte)
+  mount: Mount;
+  /** ângulo do lado da arma, relativo à frente do robô */
+  mountAngle: number;
+  /** posição da arma no referencial do robô */
+  lx: number; ly: number;
+  /** 0..100. Em 0 a arma está quebrada e não funciona até ser consertada. */
+  integrity: number;
 }
+
+export const isBroken = (ws: WeaponState) => ws.integrity <= 0;
 
 export interface Robot {
   id: number;
@@ -52,6 +64,15 @@ export interface Robot {
   boostDir: number;
   prevBoost: boolean;
   revT: number; // tempo de ré contínua
+  /** vida que o Kit de Reparo ainda pode consertar nesta luta */
+  repairLeft: number;
+  /** segundos desnorteado (sensores embaralhados) e há quanto tempo começou */
+  dazed: number;
+  dazedAge: number;
+  /** segundos até poder ser desnorteado de novo */
+  dazeImmune: number;
+  /** multiplicador da recarga de energia (reforço "Bateria turbinada") */
+  regen: number;
   uTurn: boolean; // fazendo meia-volta (não volta a dar ré até alinhar ou soltar o controle)
   uTurnTarget: number; // modo tanque: ângulo final da meia-volta
   uTurnDir: number;
@@ -59,6 +80,10 @@ export interface Robot {
 }
 
 export interface Missile { x: number; y: number; vx: number; vy: number; owner: number; life: number; angle: number; damage: number }
+/** Nuvem de fumaça: corta a linha de visão. */
+export interface Cloud { x: number; y: number; r: number; life: number }
+/** Ataque orbital marcado: explode em `t` segundos no ponto e fere só o alvo. */
+export interface Strike { x: number; y: number; r: number; t: number; owner: number; damage: number }
 
 export type FxEvent =
   | { t: "sparks"; x: number; y: number; angle: number; n: number; color?: number }
@@ -73,6 +98,11 @@ export type FxEvent =
   | { t: "shake"; power: number }
   | { t: "drill"; x: number; y: number; angle: number }
   | { t: "boost"; x: number; y: number; angle: number }
+  | { t: "laser"; x1: number; y1: number; x2: number; y2: number }
+  | { t: "heal"; x: number; y: number }
+  | { t: "block"; x: number; y: number; angle: number }
+  | { t: "pulse"; x: number; y: number; angle: number; range: number; hit: { x: number; y: number } | null }
+  | { t: "cloud"; x: number; y: number; r: number; life: number }
   | { t: "sfx"; name: SfxName; x: number; y: number; power?: number };
 
 export type SfxName =
@@ -84,6 +114,8 @@ export type DamageKind = "phys" | "fire" | "shock" | "pierce";
 export class Match {
   robots: Robot[];
   missiles: Missile[] = [];
+  clouds: Cloud[] = [];
+  strikes: Strike[] = [];
   fx: FxEvent[] = [];
   time = MATCH_TIME;
   ventTimer = 0;
@@ -94,9 +126,12 @@ export class Match {
   endDelay = 1.8;
   private acc = 0;
   private dmgAcc = new Map<number, number>();
+  /** sorteios da simulação (antimíssil): semente fixa, então a mesma luta dá sempre o mesmo resultado */
+  private rng: () => number;
 
   /** speedScale: multiplicador de velocidade por robô (a IA usa < 1 para não grudar no jogador). */
-  constructor(a: RobotBuild, b: RobotBuild, opts: { speedScale?: [number, number]; arena?: string } = {}) {
+  constructor(a: RobotBuild, b: RobotBuild, opts: { speedScale?: [number, number]; arena?: string; seed?: number } = {}) {
+    this.rng = mulberry(opts.seed ?? 0x5eed);
     this.arena = arenaById[opts.arena ?? "classica"] ?? arenaById.classica;
     this.walls = wallSegments(this.arena);
     const [s0, s1] = this.arena.spawns;
@@ -136,7 +171,7 @@ export class Match {
       this.drive(r, inputs[i], dt);
       this.weapons(r, other, inputs[i], dt);
       // status
-      r.energy = Math.min(100, r.energy + 24 * dt);
+      r.energy = Math.min(100, r.energy + 24 * dt * r.regen);
       r.flash = Math.max(0, r.flash - dt * 4);
       r.hazardCd = Math.max(0, r.hazardCd - dt);
       r.ramCd = Math.max(0, r.ramCd - dt);
@@ -146,9 +181,16 @@ export class Match {
         if (Math.random() < 0.5) this.fx.push({ t: "burning", x: r.x + (Math.random() - 0.5) * r.stats.radius, y: r.y + (Math.random() - 0.5) * r.stats.radius });
       }
       if (r.stun > 0) r.stun -= dt;
+      if (r.dazed > 0) {
+        r.dazed = Math.max(0, r.dazed - dt);
+        r.dazedAge += dt;
+        if (r.dazed === 0) r.dazeImmune = DAZE_IMMUNITY; // respiro antes do próximo
+      } else r.dazeImmune = Math.max(0, r.dazeImmune - dt);
       if (r.hp < r.stats.hp * 0.35 && Math.random() < 0.08) this.fx.push({ t: "smoke", x: r.x, y: r.y });
     }
 
+    this.clouds = this.clouds.filter((c) => (c.life -= dt) > 0);
+    this.updateStrikes(dt);
     this.collideRobots(r0, r1);
     for (const r of this.robots) this.collideArena(r);
     this.updateMissiles(dt);
@@ -226,7 +268,9 @@ export class Match {
     if (r.stun > 0) { throttle = 0; turn = 0; }
 
     const s = r.stats;
-    const maxSpeed = s.speed * r.speedScale;
+    // consertando ou com escudo ligado o robô fica mais lento
+    const slow = r.weapons.reduce((k, w) => (w.active && w.def.kind === "repair" ? k * 0.5 : w.active && w.def.kind === "shield" ? k * 0.7 : k), 1);
+    const maxSpeed = s.speed * r.speedScale * slow;
 
     // turbo (borda de subida do botão)
     r.boostCd = Math.max(0, r.boostCd - dt);
@@ -266,12 +310,36 @@ export class Match {
   }
 
   private weapons(r: Robot, t: Robot, inp: Input, dt: number) {
-    const n = r.weapons.length;
     r.weapons.forEach((ws, i) => {
       const w = ws.def;
-      const firing = !!inp.fire[i] && r.stun <= 0 && !this.over;
+      const firing = !!inp.fire[i] && r.stun <= 0 && !this.over && !isBroken(ws);
       ws.cd = Math.max(0, ws.cd - dt);
-      const mount = mountPoint(r, i, n);
+      const mount = mountPoint(r, i);
+      const aim = r.angle + ws.mountAngle;
+
+      if (w.kind === "repair") {
+        const hurt = r.repairLeft > 0 && r.hp < r.stats.hp;
+        const worst = this.mostDamaged(r);
+        ws.active = firing && r.energy > 1 && (hurt || worst !== null);
+        ws.anim = (ws.anim + dt * (ws.active ? 1 : 0.15)) % 1000;
+        if (ws.active) {
+          r.energy = Math.max(0, r.energy - w.energy * dt);
+          if (hurt) {
+            const heal = Math.min(r.repairLeft, (w.power ?? 0) * dt, r.stats.hp - r.hp);
+            r.hp += heal;
+            r.repairLeft -= heal;
+          }
+          if (worst) worst.integrity = Math.min(100, worst.integrity + 15 * dt);
+          if (Math.floor(ws.anim * 6) !== Math.floor((ws.anim - dt) * 6)) this.fx.push({ t: "heal", x: r.x, y: r.y });
+        }
+        return;
+      }
+      if (w.kind === "shield") {
+        ws.active = firing && r.energy > 1;
+        ws.anim = Math.max(0, Math.min(1, ws.anim + (ws.active ? dt * 6 : -dt * 6)));
+        if (ws.active) r.energy = Math.max(0, r.energy - w.energy * dt);
+        return;
+      }
 
       if (w.mode === "hold") {
         ws.active = firing && r.energy > 1;
@@ -280,21 +348,21 @@ export class Match {
         if (ws.active) {
           r.energy = Math.max(0, r.energy - w.energy * dt);
           if (w.kind === "flame") {
-            this.fx.push({ t: "flame", x: mount.x, y: mount.y, angle: r.angle, range: w.range });
-            if (inArc(r, t, mount, w.range, w.arc)) {
+            this.fx.push({ t: "flame", x: mount.x, y: mount.y, angle: aim, range: w.range });
+            if (inArc(aim, t, mount, w.range, w.arc)) {
               this.damage(t, w.damage * dt, "fire", r);
               ws.hitT = 0;
               t.burn = Math.max(t.burn, 3 * (1 - t.stats.fireRes));
             }
-          } else if (inArc(r, t, mount, w.range, w.arc)) {
+          } else if (inArc(aim, t, mount, w.range, w.arc)) {
             const kind: DamageKind = w.kind === "drill" ? "pierce" : "phys";
-            this.damage(t, w.damage * dt, kind, r);
+            this.damage(t, w.damage * dt, kind, r, mount);
             ws.hitT = 0;
             const cx = (mount.x + t.x) / 2, cy = (mount.y + t.y) / 2;
-            if (w.kind === "drill") this.fx.push({ t: "drill", x: cx, y: cy, angle: r.angle });
-            this.fx.push({ t: "sparks", x: cx, y: cy, angle: r.angle + Math.PI, n: 2, color: w.kind === "drill" ? 0xffa040 : undefined });
+            if (w.kind === "drill") this.fx.push({ t: "drill", x: cx, y: cy, angle: aim });
+            this.fx.push({ t: "sparks", x: cx, y: cy, angle: aim + Math.PI, n: 2, color: w.kind === "drill" ? 0xffa040 : undefined });
             // serra empurra levemente o alvo
-            t.vx += Math.cos(r.angle) * 60 * dt; t.vy += Math.sin(r.angle) * 60 * dt;
+            t.vx += Math.cos(aim) * 60 * dt; t.vy += Math.sin(aim) * 60 * dt;
           }
         }
       } else if (w.mode === "press") {
@@ -303,27 +371,30 @@ export class Match {
         if (ws.anim > 0) ws.anim = Math.max(0, ws.anim - dt * (w.kind === "hammer" ? 2.2 : 3));
         if (ws.pendingHit > 0) {
           ws.pendingHit -= dt;
-          if (ws.pendingHit <= 0) this.hammerHit(r, t, ws, i, n);
+          if (ws.pendingHit <= 0) this.hammerHit(r, t, ws, i);
         }
         if (pressed && ws.cd <= 0 && r.energy >= w.energy) {
           r.energy -= w.energy;
           ws.cd = w.cooldown;
-          this.fire(r, t, ws, i, n);
+          this.fire(r, t, ws, i);
         }
+      } else if (ws.anim > 0) {
+        ws.anim = Math.max(0, ws.anim - dt * 4);
       }
     });
   }
 
-  private fire(r: Robot, t: Robot, ws: WeaponState, i: number, n: number) {
+  private fire(r: Robot, t: Robot, ws: WeaponState, i: number) {
     const w = ws.def;
-    const m = mountPoint(r, i, n);
+    const m = mountPoint(r, i);
+    const aim = r.angle + ws.mountAngle;
     switch (w.kind) {
       case "shock": {
         ws.anim = 1;
         const hits: { x: number; y: number }[] = [];
         if (dist(r, t) < w.range + t.stats.radius + r.stats.radius) {
           this.damage(t, w.damage, "shock", r);
-          t.stun = Math.max(t.stun, 1.3 * (1 - t.stats.shockRes));
+          t.stun = Math.max(t.stun, 1.3 * (1 - t.stats.shockRes) * (1 - grounding(t)));
           hits.push({ x: t.x, y: t.y });
         }
         this.fx.push({ t: "shock", x: r.x, y: r.y, r: w.range + r.stats.radius, hits }, { t: "shake", power: 4 });
@@ -337,50 +408,82 @@ export class Match {
       case "flipper": {
         ws.anim = 1;
         this.fx.push({ t: "sfx", name: "flipper", x: m.x, y: m.y });
-        if (inArc(r, t, m, w.range, w.arc)) {
+        if (inArc(aim, t, m, w.range, w.arc)) {
           this.fx.push({ t: "sfx", name: "flipper_hit", x: t.x, y: t.y, power: t.stats.flipImmune ? 0.4 : 1 });
-          this.damage(t, w.damage, "phys", r);
+          this.damage(t, w.damage, "phys", r, m);
           if (!t.stats.flipImmune) {
             const power = 780 / (t.stats.totalMass / 70);
-            t.vx += Math.cos(r.angle) * power; t.vy += Math.sin(r.angle) * power;
+            t.vx += Math.cos(aim) * power; t.vy += Math.sin(aim) * power;
             t.stun = Math.max(t.stun, 0.8);
           } else {
-            t.vx += Math.cos(r.angle) * 120; t.vy += Math.sin(r.angle) * 120;
+            t.vx += Math.cos(aim) * 120; t.vy += Math.sin(aim) * 120;
           }
-          this.fx.push({ t: "sparks", x: (m.x + t.x) / 2, y: (m.y + t.y) / 2, angle: r.angle, n: 14 }, { t: "shake", power: 8 });
+          this.fx.push({ t: "sparks", x: (m.x + t.x) / 2, y: (m.y + t.y) / 2, angle: aim, n: 14 }, { t: "shake", power: 8 });
         }
+        break;
+      }
+      case "disruptor": {
+        ws.anim = 1;
+        const hit = inArc(aim, t, m, w.range, w.arc);
+        if (hit) {
+          this.damage(t, w.damage, "shock", r);
+          const dur = (w.power ?? 0) * (1 - t.stats.shockRes * 0.5) * (1 - grounding(t));
+          // não acumula e dá um respiro de DAZE_IMMUNITY s depois do efeito acabar
+          if (t.dazed <= 0 && t.dazeImmune <= 0 && dur > 0) { t.dazed = dur; t.dazedAge = 0; }
+        }
+        this.fx.push({ t: "pulse", x: m.x, y: m.y, angle: aim, range: w.range, hit: hit ? { x: t.x, y: t.y } : null }, { t: "shake", power: 3 });
+        break;
+      }
+      case "smoke": {
+        ws.anim = 1;
+        const c = { x: r.x, y: r.y, r: w.range, life: w.power ?? 3 };
+        this.clouds.push(c);
+        this.fx.push({ t: "cloud", ...c });
         break;
       }
       case "missile":
         ws.anim = 1;
-        this.missiles.push({ x: m.x, y: m.y, vx: Math.cos(r.angle) * 420 + r.vx * 0.3, vy: Math.sin(r.angle) * 420 + r.vy * 0.3, owner: r.id, life: 2.5, angle: r.angle, damage: w.damage });
-        r.vx -= Math.cos(r.angle) * 40; r.vy -= Math.sin(r.angle) * 40;
+        this.missiles.push({ x: m.x, y: m.y, vx: Math.cos(aim) * 420 + r.vx * 0.3, vy: Math.sin(aim) * 420 + r.vy * 0.3, owner: r.id, life: 2.5, angle: aim, damage: w.damage });
+        r.vx -= Math.cos(aim) * 40; r.vy -= Math.sin(aim) * 40;
         this.fx.push({ t: "sfx", name: "missile_launch", x: m.x, y: m.y });
         break;
     }
   }
 
-  private hammerHit(r: Robot, t: Robot, ws: WeaponState, i: number, n: number) {
-    const m = mountPoint(r, i, n);
+  private hammerHit(r: Robot, t: Robot, ws: WeaponState, i: number) {
+    const m = mountPoint(r, i);
     const w = ws.def;
-    const hx = m.x + Math.cos(r.angle) * w.range * 0.6, hy = m.y + Math.sin(r.angle) * w.range * 0.6;
-    if (inArc(r, t, m, w.range, w.arc)) {
-      this.damage(t, w.damage, "phys", r);
+    const aim = r.angle + ws.mountAngle;
+    const hx = m.x + Math.cos(aim) * w.range * 0.6, hy = m.y + Math.sin(aim) * w.range * 0.6;
+    if (inArc(aim, t, m, w.range, w.arc)) {
+      this.damage(t, w.damage, "phys", r, { x: hx, y: hy });
       t.stun = Math.max(t.stun, 0.25);
-      this.fx.push({ t: "sparks", x: hx, y: hy, angle: r.angle + Math.PI, n: 18 }, { t: "shake", power: 10 }, { t: "sfx", name: "hammer_hit", x: hx, y: hy, power: 1 });
+      this.fx.push({ t: "sparks", x: hx, y: hy, angle: aim + Math.PI, n: 18 }, { t: "shake", power: 10 }, { t: "sfx", name: "hammer_hit", x: hx, y: hy, power: 1 });
     } else {
-      this.fx.push({ t: "sparks", x: hx, y: hy, angle: r.angle + Math.PI, n: 5, color: 0x999999 }, { t: "sfx", name: "hammer_miss", x: hx, y: hy });
+      this.fx.push({ t: "sparks", x: hx, y: hy, angle: aim + Math.PI, n: 5, color: 0x999999 }, { t: "sfx", name: "hammer_miss", x: hx, y: hy });
     }
   }
 
-  damage(t: Robot, amount: number, kind: DamageKind, src?: Robot) {
+  /** `from`: de onde veio o golpe (decide escudo e qual arma leva parte do dano). */
+  damage(t: Robot, amount: number, kind: DamageKind, src?: Robot, from?: { x: number; y: number }) {
     if (t.dead || amount <= 0) return;
     const s = t.stats;
     let mult = 1;
     if (kind === "phys") mult = 1 - s.reduction;
     if (kind === "fire") mult = 1 - s.fireRes;
     if (kind === "shock") mult = 1 - s.shockRes * 0.8;
+    const physical = kind === "phys" || kind === "pierce";
+    const hit = from ? Math.atan2(from.y - t.y, from.x - t.x) : null;
+    if (physical && hit !== null) {
+      // escudo ligado do lado do golpe
+      const shield = t.weapons.find((w) => w.def.kind === "shield" && w.active && Math.abs(angDiff(hit, t.angle + w.mountAngle)) <= w.def.arc);
+      if (shield) {
+        mult *= 1 - (shield.def.power ?? 0);
+        if (amount * mult > 0.5 || Math.random() < 0.1) this.fx.push({ t: "block", x: t.x + Math.cos(hit) * t.stats.radius, y: t.y + Math.sin(hit) * t.stats.radius, angle: hit });
+      }
+    }
     const d = amount * mult;
+    if (physical && hit !== null) this.wearWeapon(t, hit, from!, d);
     t.hp = Math.max(0, t.hp - d);
     t.flash = Math.min(1, t.flash + (d > 3 ? 1 : d * 0.4));
     if (src && src !== t) src.dmgDealt += d;
@@ -388,6 +491,32 @@ export class Match {
     this.lastKind.set(t.id, kind);
   }
   private lastKind = new Map<number, DamageKind>();
+
+  /** Parte do golpe vai para a arma do lado atingido; em 0 ela quebra. */
+  private wearWeapon(t: Robot, hit: number, from: { x: number; y: number }, d: number) {
+    let best: WeaponState | null = null, bestD = Infinity;
+    t.weapons.forEach((w, i) => {
+      if (isBroken(w) || Math.abs(angDiff(hit, t.angle + w.mountAngle)) > Math.PI / 4 + 1e-6) return;
+      const p = mountPoint(t, i);
+      const dd = Math.hypot(p.x - from.x, p.y - from.y);
+      if (dd < bestD) { bestD = dd; best = w; }
+    });
+    if (!best) return;
+    const w = best as WeaponState;
+    w.integrity = Math.max(0, w.integrity - (d * WEAPON_SHARE * 100) / WEAPON_HP);
+    if (w.integrity <= 0) {
+      w.active = false;
+      const p = mountPoint(t, t.weapons.indexOf(w));
+      this.fx.push({ t: "sparks", x: p.x, y: p.y, angle: hit + Math.PI, n: 22, color: 0xaaaaaa }, { t: "smoke", x: p.x, y: p.y }, { t: "shake", power: 5 });
+    }
+  }
+
+  /** Arma mais danificada (para o reparo), ou null se todas estão inteiras. */
+  private mostDamaged(r: Robot): WeaponState | null {
+    let worst: WeaponState | null = null;
+    for (const w of r.weapons) if (w.integrity < 100 && (!worst || w.integrity < worst.integrity)) worst = w;
+    return worst;
+  }
   private dmgTimer = 0;
 
   private flushDamageNumbers() {
@@ -429,14 +558,15 @@ export class Match {
   }
 
   private ram(att: Robot, tgt: Robot, rel: number, nx: number, ny: number) {
-    const spikes = att.weapons.find((w) => w.def.kind === "spikes");
-    if (!spikes || att.ramCd > 0 || rel < 90) return;
-    // só se bater com a frente
-    if (Math.abs(angDiff(Math.atan2(ny, nx), att.angle)) > spikes.def.arc) return;
+    if (att.ramCd > 0 || rel < 90) return;
+    // só se bater com o lado onde estão os espinhos
+    const hit = Math.atan2(ny, nx);
+    const spikes = att.weapons.find((w) => w.def.kind === "spikes" && !isBroken(w) && Math.abs(angDiff(hit, att.angle + w.mountAngle)) <= w.def.arc);
+    if (!spikes) return;
     att.ramCd = spikes.def.cooldown;
     this.fx.push({ t: "sfx", name: "ram_hit", x: tgt.x, y: tgt.y, power: Math.min(1, rel / 400) });
-    this.damage(tgt, rel * spikes.def.damage * (att.stats.totalMass / 70), "phys", att);
-    this.fx.push({ t: "sparks", x: (att.x + tgt.x) / 2, y: (att.y + tgt.y) / 2, angle: att.angle + Math.PI, n: 10 });
+    this.damage(tgt, rel * spikes.def.damage * (att.stats.totalMass / 70), "phys", att, att);
+    this.fx.push({ t: "sparks", x: (att.x + tgt.x) / 2, y: (att.y + tgt.y) / 2, angle: hit + Math.PI, n: 10 });
   }
 
   /** Vent ativo/avisando agora? */
@@ -507,7 +637,8 @@ export class Match {
       m.life -= dt;
       // leve teleguiagem
       const tgt = this.robots[1 - m.owner];
-      if (!tgt.dead) {
+      // na fumaça o míssil perde o alvo e segue reto
+      if (!tgt.dead && !this.smokeBetween(m, tgt)) {
         const want = Math.atan2(tgt.y - m.y, tgt.x - m.x);
         m.angle = normAng(m.angle + clamp(angDiff(want, m.angle), -1, 1) * 1.6 * dt);
         const sp = Math.min(640, Math.hypot(m.vx, m.vy) + 500 * dt);
@@ -515,11 +646,15 @@ export class Match {
       }
       m.x += m.vx * dt; m.y += m.vy * dt;
       this.fx.push({ t: "trail", x: m.x - Math.cos(m.angle) * 10, y: m.y - Math.sin(m.angle) * 10 });
+      if (!tgt.dead && this.intercept(tgt, m)) {
+        this.fx.push({ t: "explosion", x: m.x, y: m.y, big: false });
+        continue;
+      }
       let boom = m.life <= 0 || !isOpen(this.arena, m);
       for (const r of this.robots) {
         if (r.id === m.owner || r.dead) continue;
         if (Math.hypot(r.x - m.x, r.y - m.y) < r.stats.radius + 6) {
-          this.damage(r, m.damage, "phys", this.robots[m.owner]);
+          this.damage(r, m.damage, "phys", this.robots[m.owner], m);
           r.vx += m.vx * 0.25; r.vy += m.vy * 0.25;
           boom = true;
         }
@@ -528,6 +663,84 @@ export class Match {
       else keep.push(m);
     }
     this.missiles = keep;
+  }
+
+  // ---------- reforços da Carreira (nunca usados no ranking) ----------
+
+  /** Reforço de antes da luta, aplicado logo depois de criar a partida. */
+  applyPreBoost(id: "armor" | "battery" | "sabotage", who = 0) {
+    const me = this.robots[who], foe = this.robots[1 - who];
+    if (id === "armor") { me.stats = { ...me.stats, hp: Math.round(me.stats.hp * 1.25) }; me.hp = me.stats.hp; }
+    if (id === "battery") me.regen = 1.5;
+    if (id === "sabotage") foe.hp = Math.round(foe.hp * 0.85);
+  }
+
+  /** Reforço usado durante a luta. false se não deu para usar agora. */
+  useLiveBoost(id: "repair" | "freeze" | "orbital", who = 0): boolean {
+    const me = this.robots[who], foe = this.robots[1 - who];
+    if (this.over || me.dead) return false;
+    if (id === "repair") {
+      me.hp = Math.min(me.stats.hp, me.hp + me.stats.hp * 0.3);
+      for (let k = 0; k < 4; k++) this.fx.push({ t: "heal", x: me.x, y: me.y });
+    }
+    if (id === "freeze") {
+      foe.stun = Math.max(foe.stun, 2);
+      this.fx.push({ t: "shock", x: foe.x, y: foe.y, r: foe.stats.radius * 1.6, hits: [{ x: foe.x, y: foe.y }] });
+    }
+    if (id === "orbital") this.strikes.push({ x: foe.x, y: foe.y, r: 70, t: 1, owner: who, damage: 40 });
+    return true;
+  }
+
+  /** "Continuar" depois de perder: o robô volta com `hpPct` da vida e a luta segue (+30 s se o tempo acabou). */
+  revive(who = 0, hpPct = 0.4) {
+    const me = this.robots[who];
+    me.dead = false;
+    me.hp = Math.max(1, me.stats.hp * hpPct);
+    me.burn = 0; me.stun = 0; me.vx = 0; me.vy = 0;
+    this.over = false;
+    this.winner = null;
+    this.endDelay = 1.8;
+    if (this.time <= 0.5) this.time = 30;
+  }
+
+  private updateStrikes(dt: number) {
+    for (const s of this.strikes) {
+      s.t -= dt;
+      if (s.t > 0) continue;
+      const tgt = this.robots[1 - s.owner];
+      this.fx.push({ t: "explosion", x: s.x, y: s.y, big: true }, { t: "shake", power: 14 });
+      if (!tgt.dead && Math.hypot(tgt.x - s.x, tgt.y - s.y) < s.r + tgt.stats.radius) this.damage(tgt, s.damage, "phys", this.robots[s.owner]);
+    }
+    this.strikes = this.strikes.filter((s) => s.t > 0);
+  }
+
+  /** Alguma nuvem de fumaça corta a linha entre os dois pontos (ou cobre um deles)? */
+  smokeBetween(p: { x: number; y: number }, q: { x: number; y: number }): boolean {
+    for (const c of this.clouds) {
+      const cl = closestOnSegment(c, p, q);
+      if (Math.hypot(cl.x - c.x, cl.y - c.y) < c.r) return true;
+    }
+    return false;
+  }
+
+  /** Dá para ver o alvo: sem parede nem fumaça no caminho. */
+  sees(p: { x: number; y: number }, q: { x: number; y: number }): boolean {
+    return lineOfSight(this.walls, p, q) && !this.smokeBetween(p, q);
+  }
+
+  /** Antimíssil do alvo tenta derrubar o míssil. true = derrubou. */
+  private intercept(r: Robot, m: Missile): boolean {
+    const i = r.weapons.findIndex((w) => w.def.kind === "antimissile");
+    if (i < 0 || this.over) return false;
+    const ws = r.weapons[i];
+    if (isBroken(ws) || ws.cd > 0 || r.energy < ws.def.energy || r.stun > 0) return false;
+    if (Math.hypot(m.x - r.x, m.y - r.y) > ws.def.range + r.stats.radius) return false;
+    ws.cd = ws.def.cooldown;
+    ws.anim = 1;
+    r.energy -= ws.def.energy;
+    const p = mountPoint(r, i);
+    this.fx.push({ t: "laser", x1: p.x, y1: p.y, x2: m.x, y2: m.y });
+    return this.rng() < (ws.def.power ?? 0);
   }
 
   drainFx(): FxEvent[] {
@@ -542,31 +755,54 @@ function makeRobot(id: number, build: RobotBuild, x: number, y: number, angle: n
   return {
     id, build, stats, x, y, angle, vx: 0, vy: 0,
     hp: stats.hp, energy: 100, burn: 0, stun: 0, flash: 0, hazardCd: 0, ramCd: 0,
-    weapons: build.weapons.filter(Boolean).map((wid) => ({ def: scaledWeapon(weaponById[wid], levelOf(build, wid)), cd: 0, active: false, anim: 0, prevFire: false, pendingHit: 0, hitT: 9 })),
+    weapons: makeWeapons(build, stats.radius),
     dead: false, wheelSpin: 0, dmgDealt: 0,
     speedScale: 1, boostCd: 0, boostT: 0, boostDir: angle, prevBoost: false, revT: 0, uTurn: false, uTurnTarget: 0, uTurnDir: 1, uTurnDone: false,
+    repairLeft: stats.hp * REPAIR_CAP, dazed: 0, dazedAge: 0, dazeImmune: 0, regen: 1,
   };
 }
 
-/** Posição local (relativa ao centro, robô olhando para +x) do slot de arma. */
-export function mountLocal(i: number, n: number, radius: number, kind: string) {
-  if (kind === "shock") return { x: -radius * 0.15, y: n === 1 ? 0 : (i - (n - 1) / 2) * radius * 0.5 };
-  if (kind === "spikes" || kind === "flipper") return { x: radius * 0.92, y: 0 };
-  const spread = n === 1 ? 0 : (i - (n - 1) / 2) * (radius * 1.25) / Math.max(1, n - 1);
-  return { x: radius * 0.92, y: spread };
+function makeWeapons(build: RobotBuild, radius: number): WeaponState[] {
+  const list = equippedWeapons(build);
+  const places = slotLayout(list.map((w) => ({ kind: weaponById[w.id].kind, mount: w.mount })), radius);
+  return list.map((w, i) => ({
+    def: scaledWeapon(weaponById[w.id], levelOf(build, w.id)), cd: 0, active: false, anim: 0, prevFire: false, pendingHit: 0, hitT: 9,
+    mount: w.mount, mountAngle: places[i].angle, lx: places[i].lx, ly: places[i].ly, integrity: 100,
+  }));
 }
 
-export function mountPoint(r: Robot, i: number, n: number) {
-  const l = mountLocal(i, n, r.stats.radius, r.weapons[i].def.kind);
+/**
+ * Erro dos sensores de um robô desnorteado: quanto ele erra o ângulo (rad) e a distância (fator).
+ * Muda a cada ~0,7 s e é determinístico (depende só do tempo da luta e do robô).
+ */
+export function dazeError(m: Match, r: Robot): { angle: number; dist: number } {
+  if (r.dazed <= 0) return { angle: 0, dist: 1 };
+  const k = Math.floor(m.time * 1.5) + r.id * 97;
+  const h = (n: number) => { const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453; return x - Math.floor(x); };
+  return { angle: (h(k) * 2 - 1) * Math.PI * 0.55, dist: 0.5 + h(k + 31) * 1.1 };
+}
+
+/** Proteção do Aterramento (0..1) contra paralisia e desnorteio. */
+function grounding(t: Robot): number {
+  const g = t.weapons.find((w) => w.def.kind === "grounding" && !isBroken(w));
+  return g ? g.def.power ?? 0 : 0;
+}
+
+/** Ponto da arma `i` no mundo. */
+export function mountPoint(r: Robot, i: number) {
+  const ws = r.weapons[i];
   const c = Math.cos(r.angle), s = Math.sin(r.angle);
-  return { x: r.x + l.x * c - l.y * s, y: r.y + l.x * s + l.y * c };
+  return { x: r.x + ws.lx * c - ws.ly * s, y: r.y + ws.lx * s + ws.ly * c };
 }
 
-function inArc(r: Robot, t: Robot, from: { x: number; y: number }, range: number, arc: number) {
+/** Ângulo para onde a arma `i` aponta, no mundo. */
+export const weaponAim = (r: Robot, i: number) => r.angle + (r.weapons[i]?.mountAngle ?? 0);
+
+function inArc(aim: number, t: Robot, from: { x: number; y: number }, range: number, arc: number) {
   const dx = t.x - from.x, dy = t.y - from.y;
   const d = Math.hypot(dx, dy);
   if (d - t.stats.radius > range) return false;
-  const ang = Math.abs(angDiff(Math.atan2(dy, dx), r.angle));
+  const ang = Math.abs(angDiff(Math.atan2(dy, dx), aim));
   // tolerância pelo tamanho do alvo
   return ang < arc + Math.atan2(t.stats.radius, Math.max(d, 1)) * 0.8;
 }

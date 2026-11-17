@@ -1,5 +1,6 @@
 import { clearance, lineOfSight, type Pt } from "./arenas";
-import { angDiff, dist, emptyInput, mountPoint, type Input, type Match, type Robot } from "./engine";
+import { angDiff, dazeError, dist, emptyInput, isBroken, mountPoint, weaponAim, type Input, type Match, type Robot } from "./engine";
+import { isSupport } from "./parts";
 
 /** IA simples baseada em estados, parametrizada por dificuldade (0..1). */
 export class Brain {
@@ -22,7 +23,9 @@ export class Brain {
     const d = dist(me, foe);
     const kinds = me.weapons.map((w) => w.def.kind);
     const ranged = kinds.includes("missile") && !kinds.some((k) => k === "saw" || k === "drill" || k === "hammer");
-    const toFoe = Math.atan2(foe.y - me.y, foe.x - me.x);
+    // desnorteado: erra para onde o inimigo está; na fumaça, não sabe onde ele está
+    const hidden = m.smokeBetween(me, foe);
+    const toFoe = Math.atan2(foe.y - me.y, foe.x - me.x) + dazeError(m, me).angle + (hidden ? Math.sin(m.time * 1.3 + me.id) * 1.2 : 0);
 
     // reação lenta = decide menos vezes; ruído de mira cai com dificuldade
     this.reaction -= dt;
@@ -72,11 +75,11 @@ export class Brain {
     const canBoost = me.boostCd <= 0 && me.energy > 45 && this.diff > 0.45;
     inp.boost = canBoost && Math.random() < dt * 2 * this.diff && ((this.retreat > 0) || (!ranged && d > 380));
 
-    // armas
-    const facing = Math.abs(angDiff(toFoe, me.angle));
+    // armas (cada uma mede a mira pelo próprio lado do robô)
     me.weapons.forEach((ws, i) => {
       const w = ws.def;
-      const mp = mountPoint(me, i, me.weapons.length);
+      const facing = Math.abs(angDiff(toFoe, weaponAim(me, i)));
+      const mp = mountPoint(me, i);
       const dm = Math.hypot(foe.x - mp.x, foe.y - mp.y) - foe.stats.radius;
       let want = false;
       switch (w.kind) {
@@ -85,7 +88,19 @@ export class Brain {
         case "shock": want = d < w.range + me.stats.radius + foe.stats.radius - 5 && ws.cd <= 0; break;
         case "hammer": want = dm < w.range * 0.9 && facing < 0.5 && ws.cd <= 0; break;
         case "flipper": want = dm < w.range && facing < 0.6 && ws.cd <= 0; break;
-        case "missile": want = facing < 0.25 + (1 - this.diff) * 0.3 && d > 120 && ws.cd <= 0; break;
+        case "missile": want = !hidden && facing < 0.25 + (1 - this.diff) * 0.3 && d > 120 && ws.cd <= 0; break;
+        case "disruptor": want = dm < w.range - 10 && facing < 0.5 && ws.cd <= 0 && foe.dazed <= 0; break;
+        // fumaça para fugir de mísseis ou quando está apanhando
+        case "smoke": {
+          // antes do míssil sair: inimigo com lança-mísseis, longe e mirando em mim
+          const aiming = foe.weapons.some((fw, k) => fw.def.kind === "missile" && fw.cd < 0.4 && Math.abs(angDiff(Math.atan2(me.y - foe.y, me.x - foe.x), weaponAim(foe, k))) < 0.35);
+          want = ws.cd <= 0 && (this.retreat > 0 || (aiming && d > 220) || m.missiles.some((mi) => mi.owner !== me.id && Math.hypot(mi.x - me.x, mi.y - me.y) < 420));
+          break;
+        }
+        // conserta longe do inimigo (ou com ele paralisado), com vida baixa ou arma quebrada
+        case "repair": want = (d > 170 || foe.stun > 0.3) && ((me.hp < me.stats.hp * 0.55 && me.repairLeft > 1) || me.weapons.some(isBroken)); break;
+        // liga o escudo quando o inimigo encosta do lado dele
+        case "shield": want = d < me.stats.radius + foe.stats.radius + 90 && facing < w.arc + 0.3; break;
       }
       // IA fraca hesita
       if (want && Math.random() > 0.35 + this.diff * 0.65) want = false;
@@ -93,6 +108,8 @@ export class Brain {
         // gera borda de subida: alterna
         inp.fire[i] = want && !this.fireIntent[i];
         this.fireIntent[i] = inp.fire[i];
+      } else if (isSupport(w.kind)) {
+        inp.fire[i] = want;
       } else {
         if (want) this.holdTimer = 0.25;
         inp.fire[i] = want || (this.holdTimer > 0 && w.mode === "hold");

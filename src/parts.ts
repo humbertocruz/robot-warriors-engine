@@ -8,7 +8,25 @@ export type WeaponKind =
   | "flipper"
   | "missile"
   | "drill"
-  | "spikes";
+  | "spikes"
+  // defesa e suporte
+  | "repair"
+  | "shield"
+  | "antimissile"
+  | "disruptor"
+  | "smoke"
+  | "grounding";
+
+/** Peças de defesa/suporte: não entram em "atacar com todas as armas". */
+export const SUPPORT_KINDS: ReadonlySet<WeaponKind> = new Set<WeaponKind>(["repair", "shield", "antimissile", "smoke", "grounding"]);
+export const isSupport = (kind: string) => SUPPORT_KINDS.has(kind as WeaponKind);
+
+/** Integridade das armas: quanto de dano uma arma aguenta antes de quebrar. */
+export const WEAPON_HP = 60;
+/** Parte do dano físico/perfurante recebido que também vai para a arma do lado do golpe. */
+export const WEAPON_SHARE = 0.4;
+/** O Kit de Reparo conserta no máximo esta fração da vida máxima por luta. */
+export const REPAIR_CAP = 0.35;
 
 export interface Chassis {
   id: string;
@@ -59,6 +77,8 @@ export interface Weapon {
   energy: number; // por uso ou por segundo (hold)
   mass: number;
   cost: number;
+  /** efeito das peças de suporte: reparo = vida/s, escudo = fração bloqueada, antimíssil = chance de derrubar */
+  power?: number;
 }
 
 export const CHASSIS: Chassis[] = [
@@ -91,6 +111,13 @@ export const WEAPONS: Weapon[] = [
   { id: "flipper", kind: "flipper", name: "Flipper Hidráulico", desc: "Arremessa o inimigo longe.", mode: "press", damage: 6, range: 46, arc: 0.7, cooldown: 2.4, energy: 25, mass: 16, cost: 900 },
   { id: "drill", kind: "drill", name: "Broca", desc: "Ignora blindagem.", mode: "hold", damage: 13, range: 40, arc: 0.4, cooldown: 0, energy: 16, mass: 14, cost: 1050 },
   { id: "missile", kind: "missile", name: "Lança-mísseis", desc: "Ataque à distância.", mode: "press", damage: 15, range: 900, arc: 0, cooldown: 2.1, energy: 24, mass: 15, cost: 1200 },
+  // defesa e suporte (ocupam slot como as armas)
+  { id: "repair", kind: "repair", name: "Kit de Reparo", desc: "Segure para consertar a vida e a arma mais danificada. Anda devagar enquanto conserta; até 35% da vida por luta.", mode: "hold", damage: 0, power: 14, range: 0, arc: 0, cooldown: 0, energy: 22, mass: 12, cost: 800 },
+  { id: "shield", kind: "shield", name: "Escudo", desc: "Segure para bloquear 75% do dano físico vindo do lado dele. Deixa o robô mais lento.", mode: "hold", damage: 0, power: 0.75, range: 0, arc: 0.61, cooldown: 0, energy: 15, mass: 16, cost: 950 },
+  { id: "disruptor", kind: "disruptor", name: "Pulso Desnorteador", desc: "Descarga curta à frente que embaralha os sensores do alvo: ele erra para onde vai. Em você, inverte esquerda e direita.", mode: "press", damage: 4, power: 1.6, range: 110, arc: 0.6, cooldown: 6, energy: 35, mass: 11, cost: 1100 },
+  { id: "smoke", kind: "smoke", name: "Fumaça", desc: "Solta uma nuvem que corta a linha de visão por 3 s: mísseis perdem o alvo e a IA para de ver.", mode: "press", damage: 0, power: 3, range: 120, arc: 0, cooldown: 8, energy: 25, mass: 8, cost: 650 },
+  { id: "grounding", kind: "grounding", name: "Aterramento", desc: "Passivo: reduz 60% da paralisia do choque e do tempo desnorteado.", mode: "passive", damage: 0, power: 0.6, range: 0, arc: 0, cooldown: 0, energy: 0, mass: 6, cost: 500 },
+  { id: "antimissile", kind: "antimissile", name: "Antimíssil", desc: "Passivo: atira sozinho nos mísseis que chegam perto.", mode: "passive", damage: 0, power: 0.6, range: 160, arc: 0, cooldown: 1.5, energy: 10, mass: 9, cost: 700 },
 ];
 
 export const ALL_PARTS = [...CHASSIS, ...DRIVES, ...ARMORS, ...WEAPONS];
@@ -102,6 +129,18 @@ export const driveById = byId(DRIVES);
 export const armorById = byId(ARMORS);
 export const weaponById = byId(WEAPONS);
 
+/** Lado do robô onde a arma fica. */
+export type Mount = "front" | "left" | "right" | "back";
+/** Ângulo de cada lado, relativo à frente do robô (y para baixo: esquerda = −90°). */
+export const MOUNTS: readonly { id: Mount; label: string; short: string; angle: number }[] = [
+  { id: "front", label: "Frente", short: "↑", angle: 0 },
+  { id: "left", label: "Esquerda", short: "←", angle: -Math.PI / 2 },
+  { id: "right", label: "Direita", short: "→", angle: Math.PI / 2 },
+  { id: "back", label: "Trás", short: "↓", angle: Math.PI },
+];
+export const mountAngle = (m: Mount | undefined) => MOUNTS.find((x) => x.id === m)?.angle ?? 0;
+export const isMount = (v: unknown): v is Mount => MOUNTS.some((m) => m.id === v);
+
 export interface RobotBuild {
   name: string;
   color: number;
@@ -109,8 +148,48 @@ export interface RobotBuild {
   drive: string;
   armor: string;
   weapons: string[];
+  /** lado de cada slot, alinhado com `weapons`. Ausente = frente (saves antigos) */
+  mounts?: Mount[];
   /** nível de cada peça (id -> 1..MAX_LEVEL). Ausente = 1 */
   levels?: Record<string, number>;
+}
+
+/** Armas equipadas (sem os slots vazios), com o lado de cada uma. É a ordem de "Arma 1, 2, 3" na luta. */
+export function equippedWeapons(b: RobotBuild): { id: string; mount: Mount }[] {
+  return b.weapons
+    .map((id, i) => ({ id, mount: isMount(b.mounts?.[i]) ? b.mounts![i] : ("front" as Mount) }))
+    .filter((w) => w.id && weaponById[w.id]);
+}
+
+export interface SlotPlace {
+  /** ângulo do lado, relativo à frente do robô */
+  angle: number;
+  /** posição no referencial do lado (como se a arma estivesse na frente): usada para desenhar */
+  fx: number; fy: number;
+  /** posição no referencial do robô (frente = +x) */
+  lx: number; ly: number;
+}
+
+/**
+ * Onde cada arma fica no robô. Armas do mesmo lado se espalham ao longo dele.
+ * Com todas na frente, dá exatamente as posições de antes (saves e ranking não mudam).
+ */
+export function slotLayout(list: { kind: string; mount: Mount }[], R: number): SlotPlace[] {
+  return list.map((w, i) => {
+    const group = list.map((x, k) => (x.mount === w.mount ? k : -1)).filter((k) => k >= 0);
+    const j = group.indexOf(i), n = group.length;
+    const ext = w.mount === "left" || w.mount === "right" ? 0.75 : 0.92;
+    let fx: number, fy: number;
+    if (w.kind === "shock") { fx = -R * 0.15; fy = n === 1 ? 0 : (j - (n - 1) / 2) * R * 0.5; }
+    else if (w.kind === "spikes" || w.kind === "flipper") { fx = R * ext; fy = 0; }
+    else { fx = R * ext; fy = n === 1 ? 0 : (j - (n - 1) / 2) * (R * 1.25) / Math.max(1, n - 1); }
+    const angle = mountAngle(w.mount);
+    const c = Math.cos(angle), s = Math.sin(angle);
+    // frente: sem rotação, para não introduzir diferença de ponto flutuante
+    const lx = angle === 0 ? fx : fx * c - fy * s;
+    const ly = angle === 0 ? fy : fx * s + fy * c;
+    return { angle, fx, fy, lx, ly };
+  });
 }
 
 // ---------- Níveis de peça ----------
@@ -131,6 +210,12 @@ export function levelBonusText(id: string): string {
   if (armorById[id]) return "+3% blindagem e +5% resistências por nível";
   const w = weaponById[id];
   if (w?.kind === "spikes") return "+15% dano de batida por nível";
+  if (w?.kind === "repair") return "+12% conserto por segundo e −5% energia por nível";
+  if (w?.kind === "shield") return "+3% bloqueio e −5% energia por nível";
+  if (w?.kind === "antimissile") return "+5% chance de derrubar e −5% recarga por nível";
+  if (w?.kind === "disruptor") return "+8% tempo desnorteado e −5% recarga/energia por nível";
+  if (w?.kind === "smoke") return "+8% duração da nuvem e −5% recarga por nível";
+  if (w?.kind === "grounding") return "+5% de proteção por nível";
   return "+12% dano e −5% recarga/energia por nível";
 }
 
@@ -141,6 +226,13 @@ export function scaledWeapon(w: Weapon, lvl: number): Weapon {
     damage: w.damage * (1 + (w.kind === "spikes" ? 0.15 : 0.12) * up),
     cooldown: w.cooldown * (1 - 0.05 * up),
     energy: w.energy * (1 - 0.05 * up),
+    power: w.power === undefined ? undefined
+      : w.kind === "repair" ? w.power * (1 + 0.12 * up)
+      : w.kind === "shield" ? Math.min(0.9, w.power + 0.03 * up)
+      : w.kind === "antimissile" ? Math.min(0.9, w.power + 0.05 * up)
+      : w.kind === "disruptor" || w.kind === "smoke" ? w.power * (1 + 0.08 * up)
+      : w.kind === "grounding" ? Math.min(0.85, w.power + 0.05 * up)
+      : w.power,
   };
 }
 
@@ -193,6 +285,8 @@ export function validateBuild(b: RobotBuild): string | null {
   if (!c) return "Chassi inválido";
   const filled = b.weapons.filter(Boolean);
   if (filled.length === 0) return "Equipe pelo menos uma arma";
+  if (!filled.some((id) => weaponById[id] && !isSupport(weaponById[id].kind))) return "Equipe pelo menos uma arma de ataque";
+  if (b.mounts && b.mounts.some((m) => m !== undefined && !isMount(m))) return "Posição de arma inválida";
   if (buildStats(b).overweight) return "Robô acima do peso máximo do chassi";
   return null;
 }
@@ -210,8 +304,8 @@ export const CAMPAIGN: Opponent[] = [
   { build: { name: "Churrasqueira", color: 0xe84a2f, chassis: "striker", drive: "wheels", armor: "ceramica", weapons: ["flame", "spikes"] }, difficulty: 0.4, reward: 200, quote: "Ao ponto ou bem passado?" },
   { build: { name: "Faísca", color: 0x2fb8e8, chassis: "vespa", drive: "omni", armor: "isolante", weapons: ["shock", "saw"] }, difficulty: 0.5, reward: 250, quote: "Zzzzt." },
   { build: { name: "Marreta", color: 0x6ad15a, chassis: "cunha", drive: "treads", armor: "steel", weapons: ["hammer", "flipper"] }, difficulty: 0.62, reward: 320, quote: "Bate que é sucesso." },
-  { build: { name: "Vulcão", color: 0xff7a1a, chassis: "tita", drive: "treads", armor: "ceramica", weapons: ["flame", "missile", "shock"] }, difficulty: 0.78, reward: 420, quote: "A arena vai derreter." },
-  { build: { name: "ÔMEGA", color: 0xb36ae8, chassis: "tita", drive: "omni", armor: "titanio", weapons: ["drill", "missile", "hammer"] }, difficulty: 0.95, reward: 700, quote: "Fim da linha." },
+  { build: { name: "Vulcão", color: 0xff7a1a, chassis: "tita", drive: "treads", armor: "ceramica", weapons: ["flame", "shock", "antimissile"] }, difficulty: 0.78, reward: 420, quote: "A arena vai derreter." },
+  { build: { name: "ÔMEGA", color: 0xb36ae8, chassis: "tita", drive: "omni", armor: "titanio", weapons: ["drill", "missile", "shield"], mounts: ["front", "front", "back"] }, difficulty: 0.95, reward: 700, quote: "Fim da linha." },
 ];
 
 /** Oponentes ficam mais fortes ao longo da campanha (e em revanches). */
@@ -223,14 +317,18 @@ export function opponentWithLevels(o: Opponent, stage: number, wins = 0): RobotB
   return { ...b, levels };
 }
 
-export function randomBuild(seed = Math.random()): RobotBuild {
+/** Robô sorteado (luta rápida). `allowed`: só usa estas peças (ex.: as liberadas na Carreira). */
+export function randomBuild(seed = Math.random(), allowed?: ReadonlySet<string>): RobotBuild {
   const pick = <T,>(arr: T[], r: number) => arr[Math.floor(r * arr.length) % arr.length];
+  const ok = (id: string) => !allowed || allowed.has(id);
   const rnd = mulberry(Math.floor(seed * 1e9));
-  const chassis = pick(CHASSIS, rnd());
+  const chassis = pick(CHASSIS.filter((c) => ok(c.id)), rnd());
   const weapons: string[] = [];
-  const pool = WEAPONS.map((w) => w.id);
+  const attack = WEAPONS.filter((w) => !isSupport(w.kind) && ok(w.id)).map((w) => w.id);
+  const pool = WEAPONS.filter((w) => ok(w.id)).map((w) => w.id);
   for (let i = 0; i < chassis.slots; i++) {
-    const w = pick(pool, rnd());
+    // a primeira é sempre de ataque: robô só com defesa não luta
+    const w = pick(i === 0 ? attack : pool, rnd());
     if (!weapons.includes(w)) weapons.push(w);
   }
   const names = ["Trator", "Picadinho", "Rebimboca", "Parafusão", "Curto-Circuito", "Bigorna", "Torradeira", "Moedor"];
@@ -238,8 +336,8 @@ export function randomBuild(seed = Math.random()): RobotBuild {
     name: pick(names, rnd()),
     color: pick(ROBOT_COLORS, rnd()),
     chassis: chassis.id,
-    drive: pick(DRIVES, rnd()).id,
-    armor: pick(ARMORS, rnd()).id,
+    drive: pick(DRIVES.filter((d) => ok(d.id)), rnd()).id,
+    armor: pick(ARMORS.filter((a) => ok(a.id)), rnd()).id,
     weapons,
   };
 }
