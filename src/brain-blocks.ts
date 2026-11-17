@@ -2,13 +2,15 @@
 // Dados puros (JSON): dá para salvar, exportar e compartilhar. O interpretador é determinístico
 // (sem Math.random / Date.now), então a mesma luta com os mesmos cérebros sempre dá o mesmo resultado.
 import { clearance, lineOfSight, type Pt } from "./arenas";
-import { angDiff, BOOST, dist, emptyInput, type Input, type Match, type Robot } from "./engine";
+import { angDiff, BOOST, dazeError, dist, emptyInput, isBroken, weaponAim, type Input, type Match, type Robot } from "./engine";
+import { isSupport, REPAIR_CAP } from "./parts";
 
 // ---------- sensores ----------
 export type SensorId =
   | "dist" | "angle" | "side" | "myHp" | "foeHp" | "myEn" | "foeEn"
   | "wall" | "hazard" | "sight" | "turbo" | "burning" | "time"
-  | "ready1" | "ready2" | "ready3" | "range1" | "range2" | "range3";
+  | "ready1" | "ready2" | "ready3" | "range1" | "range2" | "range3" | "behind"
+  | "missile" | "foeShield" | "foeRepair" | "repairLeft" | "int1" | "int2" | "int3" | "dazed";
 
 export interface SensorDef {
   id: SensorId;
@@ -43,17 +45,26 @@ export const SENSORS: SensorDef[] = [
   { id: "range1", label: "Inimigo ao alcance da arma 1", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta." },
   { id: "range2", label: "Inimigo ao alcance da arma 2", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta." },
   { id: "range3", label: "Inimigo ao alcance da arma 3", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Na distância e na direção em que ela acerta." },
+  { id: "behind", label: "Inimigo atrás de mim", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Mais de 135° fora da frente: bom para armas na traseira." },
+  { id: "missile", label: "Míssil vindo em mim", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Um míssil do inimigo a menos de 350px, vindo na minha direção." },
+  { id: "foeShield", label: "Inimigo com escudo ligado", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "" },
+  { id: "foeRepair", label: "Inimigo consertando", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Enquanto conserta ele anda devagar." },
+  { id: "repairLeft", label: "Reparo restante", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 50, hint: "Quanto do limite de conserto da luta ainda sobra (0 sem Kit de Reparo)." },
+  { id: "int1", label: "Arma 1 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada." },
+  { id: "int2", label: "Arma 2 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada." },
+  { id: "dazed", label: "Estou desnorteado", kind: "bool", min: 0, max: 1, step: 1, def: 1, hint: "Levei um Pulso Desnorteador: distância, ângulo e lado do inimigo estão errados." },
+  { id: "int3", label: "Arma 3 inteira", kind: "num", unit: "%", min: 0, max: 100, step: 5, def: 40, hint: "Em 0% ela quebra até ser consertada." },
 ];
 export const sensorById = Object.fromEntries(SENSORS.map((s) => [s.id, s])) as Record<SensorId, SensorDef>;
 
 // ---------- ações ----------
-export type ActionId = "approach" | "flee" | "circle" | "keep" | "escape" | "center" | "aim" | "fire" | "boost";
-export type ParamKind = "none" | "dist" | "orbit" | "weapon";
+export type ActionId = "approach" | "flee" | "circle" | "keep" | "escape" | "center" | "aim" | "aimWith" | "fire" | "boost" | "repair" | "shield" | "smoke";
+export type ParamKind = "none" | "dist" | "orbit" | "weapon" | "slot";
 
 export interface ActionDef {
   id: ActionId;
   label: string;
-  kind: "move" | "attack" | "turbo";
+  kind: "move" | "attack" | "turbo" | "defense";
   param: ParamKind;
   def: number;
   hint: string;
@@ -67,8 +78,12 @@ export const ACTIONS: ActionDef[] = [
   { id: "escape", label: "Sair do perigo", kind: "move", param: "none", def: 0, hint: "Afasta do espinho ou vent mais próximo." },
   { id: "center", label: "Ir para o centro", kind: "move", param: "none", def: 0, hint: "Centro da arena." },
   { id: "aim", label: "Parar e mirar", kind: "move", param: "none", def: 0, hint: "Fica parado, só gira para o inimigo." },
+  { id: "aimWith", label: "Mirar com", kind: "move", param: "slot", def: 1, hint: "Fica parado e gira até o lado dessa arma apontar para o inimigo." },
   { id: "fire", label: "Atacar com", kind: "attack", param: "weapon", def: 0, hint: "Aciona a arma enquanto a regra valer." },
   { id: "boost", label: "Usar turbo", kind: "turbo", param: "none", def: 0, hint: "Arrancada na direção em que está indo." },
+  { id: "repair", label: "Consertar", kind: "defense", param: "none", def: 0, hint: "Usa o Kit de Reparo enquanto a regra valer. Anda devagar." },
+  { id: "shield", label: "Ligar escudo", kind: "defense", param: "none", def: 0, hint: "Liga o escudo enquanto a regra valer. Anda mais devagar." },
+  { id: "smoke", label: "Soltar fumaça", kind: "defense", param: "none", def: 0, hint: "Solta a nuvem de fumaça (se tiver e estiver pronta)." },
 ];
 export const actionById = Object.fromEntries(ACTIONS.map((a) => [a.id, a])) as Record<ActionId, ActionDef>;
 
@@ -175,25 +190,28 @@ function weaponInRange(me: Robot, foe: Robot, i: number, toFoe: number): boolean
   if (!ws) return false;
   const w = ws.def;
   const edge = dist(me, foe) - foe.stats.radius - me.stats.radius;
-  const facing = Math.abs(angDiff(toFoe, me.angle));
+  const facing = Math.abs(angDiff(toFoe, weaponAim(me, i)));
   switch (w.kind) {
     case "saw": case "drill": return edge < w.range - 6 && facing < 0.8;
     case "flame": return edge < w.range - 20 && facing < 0.5;
     case "shock": return edge < w.range - 10;
     case "hammer": case "flipper": return edge < w.range - 6 && facing < 0.5;
     case "missile": return facing < 0.25 && dist(me, foe) > 120;
+    case "disruptor": return edge < w.range - 10 && facing < 0.5;
     default: return false; // passivas (espinhos) não têm gatilho
   }
 }
 
 export function readSensors(m: Match, me: Robot, foe: Robot): { s: Sensors; ctx: Ctx } {
-  const toFoe = Math.atan2(foe.y - me.y, foe.x - me.x);
-  const d = dist(me, foe);
+  // desnorteado: acha que o inimigo está em outro lugar (e age em cima disso)
+  const err = dazeError(m, me);
+  const toFoe = Math.atan2(foe.y - me.y, foe.x - me.x) + err.angle;
+  const d = dist(me, foe) * err.dist;
   const hz = nearestHazard(m, me);
   const rel = angDiff(toFoe, me.angle);
   const ready = (i: number) => {
     const ws = me.weapons[i];
-    if (!ws || ws.def.mode === "passive") return 0;
+    if (!ws || ws.def.mode === "passive" || isBroken(ws)) return 0;
     return ws.cd <= 0 && me.energy >= Math.min(ws.def.energy, 10) ? 1 : 0;
   };
   const s: Sensors = {
@@ -206,7 +224,7 @@ export function readSensors(m: Match, me: Robot, foe: Robot): { s: Sensors; ctx:
     foeEn: foe.energy,
     wall: Math.max(0, clearance(m.arena, m.walls, me) - me.stats.radius),
     hazard: hz ? Math.max(0, hz.d) : 999,
-    sight: lineOfSight(m.walls, me, foe) ? 1 : 0,
+    sight: m.sees(me, foe) ? 1 : 0,
     turbo: me.boostCd <= 0 && me.energy >= BOOST.energy ? 1 : 0,
     burning: me.burn > 0 ? 1 : 0,
     time: m.time,
@@ -214,6 +232,19 @@ export function readSensors(m: Match, me: Robot, foe: Robot): { s: Sensors; ctx:
     range1: weaponInRange(me, foe, 0, toFoe) ? 1 : 0,
     range2: weaponInRange(me, foe, 1, toFoe) ? 1 : 0,
     range3: weaponInRange(me, foe, 2, toFoe) ? 1 : 0,
+    behind: Math.abs(rel) > (Math.PI * 3) / 4 ? 1 : 0,
+    missile: m.missiles.some((mi) => {
+      if (mi.owner === me.id) return false;
+      const dx = me.x - mi.x, dy = me.y - mi.y;
+      return Math.hypot(dx, dy) < 350 && Math.abs(angDiff(Math.atan2(dy, dx), Math.atan2(mi.vy, mi.vx))) < 0.5;
+    }) ? 1 : 0,
+    foeShield: foe.weapons.some((w) => w.def.kind === "shield" && w.active) ? 1 : 0,
+    foeRepair: foe.weapons.some((w) => w.def.kind === "repair" && w.active) ? 1 : 0,
+    repairLeft: me.weapons.some((w) => w.def.kind === "repair") ? (me.repairLeft / (me.stats.hp * REPAIR_CAP)) * 100 : 0,
+    int1: me.weapons[0]?.integrity ?? 0,
+    int2: me.weapons[1]?.integrity ?? 0,
+    int3: me.weapons[2]?.integrity ?? 0,
+    dazed: me.dazed > 0 ? 1 : 0,
   };
   return { s, ctx: { m, me, foe, toFoe, dist: d, hazard: hz } };
 }
@@ -260,8 +291,9 @@ export class ProgramBrain {
         const def = actionById[act.a];
         if (def.kind === "move") { if (!move) move = act; }
         else if (def.kind === "turbo") boost = true;
-        else if (act.v === 0) fire[0] = fire[1] = fire[2] = true;
-        else fire[act.v - 1] = true;
+        else if (def.kind === "defense") me.weapons.forEach((w, k) => { if (w.def.kind === act.a) fire[k] = true; });
+        else if (act.v === 0) me.weapons.forEach((w, k) => { if (!isSupport(w.def.kind)) fire[k] = true; });
+        else if (act.v >= 1 && act.v <= 3) fire[act.v - 1] = true;
       }
     });
 
@@ -316,6 +348,12 @@ export class ProgramBrain {
         break;
       }
       case "aim": this.aimOnly(inp, me, toFoe); return;
+      case "aimWith": {
+        // gira para o lado da arma ficar de frente para o inimigo
+        const ws = me.weapons[Math.max(1, Math.min(3, Math.round(act.v))) - 1];
+        this.aimOnly(inp, me, toFoe - (ws?.mountAngle ?? 0));
+        return;
+      }
     }
     if (heading === null) return;
     heading = this.steer(c, heading, dt);
