@@ -22,11 +22,22 @@ describe("ranking: núcleo determinístico", () => {
   });
   // Notas de referência: se mudarem sem subir ENGINE_VERSION, o motor mudou e o ranking ficaria injusto.
   test(`notas de referência (ENGINE_VERSION ${ENGINE_VERSION})`, () => {
-    expect(ENGINE_VERSION).toBe(2);
-    expect(runCategory(brain("Lutador"), "equilibrado").total).toBe(747);
-    expect(runCategory(brain("Atirador"), "equilibrado").total).toBe(90);
-    expect(runCategory(brain("Toureiro"), "tanque").total).toBe(393);
-    expect(runCategory(brain("Lutador"), "defensor").total).toBe(809);
+    expect(ENGINE_VERSION).toBe(3);
+    expect(runCategory(brain("Lutador"), "equilibrado").total).toBe(555);
+    expect(runCategory(brain("Atirador"), "equilibrado").total).toBe(513);
+    expect(runCategory(brain("Toureiro"), "tanque").total).toBe(341);
+    expect(runCategory(brain("Lutador"), "defensor").total).toBe(332);
+    expect(runCategory(brain("Guardião"), "defensor").total).toBe(786);
+  }, 30000);
+  test("trocar de lado não muda a nota: o mesmo cérebro dos dois lados empata", () => {
+    for (const t of TEMPLATES) {
+      const id = RANKING_OPPONENTS.find((o) => o.name === t.name)!.id;
+      // espelho: o resultado de um lado é o oposto do outro, então o desafio sempre fecha em empate
+      for (const a of RANKING_ARENAS) expect(runChallenge(t.make(), "equilibrado", a.id, id).outcome).toBe("draw");
+    }
+  }, 30000);
+  test("ids dos adversários sem acento", () => {
+    for (const o of RANKING_OPPONENTS) expect(o.id).toMatch(/^[a-z]+$/);
   });
   test("desafio inválido lança erro", () => {
     expect(() => runChallenge(brain("Lutador"), "nao-existe", "cruz", "lutador")).toThrow();

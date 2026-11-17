@@ -14,6 +14,12 @@ describe("Modo História: gerador de fases", () => {
 
   // Se este teste quebrar, a fórmula mudou: a fase 8 de quem já jogou viraria outra fase.
   // Só atualize o valor junto com uma STORY_VERSION nova (ver docs/specs/modo-historia.md).
+  // Peça nova no fim de UNLOCKS muda só as fases a partir dela (Lança-minas: fase 44); as anteriores não podem mudar.
+  test("fases 1 a 43 iguais às de antes do Lança-minas", () => {
+    const all = Array.from({ length: 43 }, (_, i) => storyStage(i + 1));
+    expect(createHash("sha256").update(JSON.stringify(all)).digest("hex").slice(0, 16)).toBe("1a31795c2fc64c8f");
+  });
+
   test("fórmula congelada (STORY_VERSION 1)", () => {
     const all = Array.from({ length: 200 }, (_, i) => storyStage(i + 1));
     const hash = createHash("sha256").update(JSON.stringify(all)).digest("hex").slice(0, 16);

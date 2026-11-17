@@ -58,6 +58,8 @@ export interface Robot {
   dead: boolean;
   wheelSpin: number;
   dmgDealt: number;
+  /** dano causado por arma equipada (mesmo índice de `weapons`), para o resumo do duelo */
+  dmgBy: number[];
   speedScale: number;
   boostCd: number;
   boostT: number;
@@ -79,9 +81,13 @@ export interface Robot {
   uTurnDone: boolean;
 }
 
-export interface Missile { x: number; y: number; vx: number; vy: number; owner: number; life: number; angle: number; damage: number }
+export interface Missile { x: number; y: number; vx: number; vy: number; owner: number; life: number; angle: number; damage: number; slot?: number }
 /** Nuvem de fumaça: corta a linha de visão. */
 export interface Cloud { x: number; y: number; r: number; life: number }
+/** Mina no chão (Lança-minas). Arma em `armT` s; armada, explode em qualquer robô que encostar, inclusive o dono. */
+export interface Mine { x: number; y: number; owner: number; armT: number; life: number; damage: number; radius: number; slot: number; armed: boolean }
+/** Tempo para armar, raio do gatilho (além do raio do robô), máximo por robô e duração (docs/specs/lanca-minas.md). */
+export const MINE = { arm: 0.8, trigger: 12, max: 3, life: 20 } as const;
 /** Ataque orbital marcado: explode em `t` segundos no ponto e fere só o alvo. */
 export interface Strike { x: number; y: number; r: number; t: number; owner: number; damage: number }
 
@@ -107,7 +113,7 @@ export type FxEvent =
 
 export type SfxName =
   | "hammer_swing" | "hammer_hit" | "hammer_miss" | "flipper" | "flipper_hit" | "missile_launch"
-  | "boost" | "robot_collide" | "ram_hit" | "wall_hit" | "spike_hit";
+  | "boost" | "robot_collide" | "ram_hit" | "wall_hit" | "spike_hit" | "mine_drop" | "mine_arm";
 
 export type DamageKind = "phys" | "fire" | "shock" | "pierce";
 
@@ -116,6 +122,7 @@ export class Match {
   missiles: Missile[] = [];
   clouds: Cloud[] = [];
   strikes: Strike[] = [];
+  mines: Mine[] = [];
   fx: FxEvent[] = [];
   time = MATCH_TIME;
   ventTimer = 0;
@@ -152,6 +159,9 @@ export class Match {
     return this.over && this.endDelay <= 0;
   }
 
+  /** passos simulados (alterna quem age primeiro) */
+  private stepN = 0;
+
   step(dt: number, inputs: Input[]) {
     const [r0, r1] = this.robots;
     if (this.over) {
@@ -164,7 +174,10 @@ export class Match {
 
     this.updateVent(dt);
 
-    for (let i = 0; i < 2; i++) {
+    // ordem alternada a cada passo: com ordem fixa, o robô 0 andava e atacava sempre antes (vantagem da esquerda)
+    const first = this.stepN++ % 2;
+    for (let k = 0; k < 2; k++) {
+      const i = k === 0 ? first : 1 - first;
       const r = this.robots[i];
       const other = this.robots[1 - i];
       if (r.dead) { r.vx *= 0.9; r.vy *= 0.9; r.x += r.vx * dt; r.y += r.vy * dt; continue; }
@@ -177,7 +190,10 @@ export class Match {
       r.ramCd = Math.max(0, r.ramCd - dt);
       if (r.burn > 0) {
         r.burn -= dt;
+        // o fogo que continua queimando conta como dano do lança-chamas de quem pôs fogo
+        this.hitSlot = other.weapons.findIndex((w) => w.def.kind === "flame");
         this.damage(r, 5 * dt, "fire", other);
+        this.hitSlot = -1;
         if (Math.random() < 0.5) this.fx.push({ t: "burning", x: r.x + (Math.random() - 0.5) * r.stats.radius, y: r.y + (Math.random() - 0.5) * r.stats.radius });
       }
       if (r.stun > 0) r.stun -= dt;
@@ -194,6 +210,7 @@ export class Match {
     this.collideRobots(r0, r1);
     for (const r of this.robots) this.collideArena(r);
     this.updateMissiles(dt);
+    this.updateMines(dt);
     this.flushDamageNumbers();
 
     if (!this.over) {
@@ -309,8 +326,12 @@ export class Match {
     r.wheelSpin += (r.vx * fx + r.vy * fy) * dt * 0.08 + turn * dt * 2;
   }
 
+  /** arma que está causando o dano agora (índice em `weapons` do atacante), ou -1 */
+  private hitSlot = -1;
+
   private weapons(r: Robot, t: Robot, inp: Input, dt: number) {
     r.weapons.forEach((ws, i) => {
+      this.hitSlot = i;
       const w = ws.def;
       const firing = !!inp.fire[i] && r.stun <= 0 && !this.over && !isBroken(ws);
       ws.cd = Math.max(0, ws.cd - dt);
@@ -382,6 +403,7 @@ export class Match {
         ws.anim = Math.max(0, ws.anim - dt * 4);
       }
     });
+    this.hitSlot = -1;
   }
 
   private fire(r: Robot, t: Robot, ws: WeaponState, i: number) {
@@ -441,9 +463,24 @@ export class Match {
         this.fx.push({ t: "cloud", ...c });
         break;
       }
+      case "mines": {
+        ws.anim = 1;
+        // arremessa na direção do lado da arma; se cair fora da arena, vem para mais perto
+        const reach = w.power ?? 70;
+        let px = m.x, py = m.y;
+        for (let k = 8; k >= 0; k--) {
+          const tx = m.x + Math.cos(aim) * reach * (k / 8), ty = m.y + Math.sin(aim) * reach * (k / 8);
+          if (isOpen(this.arena, { x: tx, y: ty })) { px = tx; py = ty; break; }
+        }
+        const mine = this.mines.filter((mi) => mi.owner === r.id);
+        if (mine.length >= MINE.max) this.mines.splice(this.mines.indexOf(mine[0]), 1); // a mais antiga some
+        this.mines.push({ x: px, y: py, owner: r.id, armT: MINE.arm, life: MINE.life, damage: w.damage, radius: w.range, slot: i, armed: false });
+        this.fx.push({ t: "sfx", name: "mine_drop", x: px, y: py });
+        break;
+      }
       case "missile":
         ws.anim = 1;
-        this.missiles.push({ x: m.x, y: m.y, vx: Math.cos(aim) * 420 + r.vx * 0.3, vy: Math.sin(aim) * 420 + r.vy * 0.3, owner: r.id, life: 2.5, angle: aim, damage: w.damage });
+        this.missiles.push({ x: m.x, y: m.y, vx: Math.cos(aim) * 420 + r.vx * 0.3, vy: Math.sin(aim) * 420 + r.vy * 0.3, owner: r.id, life: 2.5, angle: aim, damage: w.damage, slot: i });
         r.vx -= Math.cos(aim) * 40; r.vy -= Math.sin(aim) * 40;
         this.fx.push({ t: "sfx", name: "missile_launch", x: m.x, y: m.y });
         break;
@@ -486,7 +523,10 @@ export class Match {
     if (physical && hit !== null) this.wearWeapon(t, hit, from!, d);
     t.hp = Math.max(0, t.hp - d);
     t.flash = Math.min(1, t.flash + (d > 3 ? 1 : d * 0.4));
-    if (src && src !== t) src.dmgDealt += d;
+    if (src && src !== t) {
+      src.dmgDealt += d;
+      if (this.hitSlot >= 0 && src.dmgBy[this.hitSlot] !== undefined) src.dmgBy[this.hitSlot] += d;
+    }
     this.dmgAcc.set(t.id, (this.dmgAcc.get(t.id) ?? 0) + d);
     this.lastKind.set(t.id, kind);
   }
@@ -565,7 +605,9 @@ export class Match {
     if (!spikes) return;
     att.ramCd = spikes.def.cooldown;
     this.fx.push({ t: "sfx", name: "ram_hit", x: tgt.x, y: tgt.y, power: Math.min(1, rel / 400) });
+    this.hitSlot = att.weapons.indexOf(spikes);
     this.damage(tgt, rel * spikes.def.damage * (att.stats.totalMass / 70), "phys", att, att);
+    this.hitSlot = -1;
     this.fx.push({ t: "sparks", x: (att.x + tgt.x) / 2, y: (att.y + tgt.y) / 2, angle: hit + Math.PI, n: 10 });
   }
 
@@ -654,15 +696,68 @@ export class Match {
       for (const r of this.robots) {
         if (r.id === m.owner || r.dead) continue;
         if (Math.hypot(r.x - m.x, r.y - m.y) < r.stats.radius + 6) {
+          this.hitSlot = m.slot ?? -1;
           this.damage(r, m.damage, "phys", this.robots[m.owner], m);
+          this.hitSlot = -1;
           r.vx += m.vx * 0.25; r.vy += m.vy * 0.25;
           boom = true;
         }
       }
-      if (boom) this.fx.push({ t: "explosion", x: m.x, y: m.y, big: false }, { t: "shake", power: 6 });
-      else keep.push(m);
+      if (boom) {
+        this.fx.push({ t: "explosion", x: m.x, y: m.y, big: false }, { t: "shake", power: 6 });
+        // a explosão do míssil detona minas bem perto
+        const near = this.mines.filter((mi) => Math.hypot(mi.x - m.x, mi.y - m.y) < 40);
+        if (near.length) this.detonate(near);
+      } else keep.push(m);
     }
     this.missiles = keep;
+  }
+
+  /** Minas: armam, somem depois de MINE.life e explodem quando um robô (qualquer um) encosta numa armada. */
+  private updateMines(dt: number) {
+    if (!this.mines.length) return;
+    const triggered: Mine[] = [];
+    for (const mi of this.mines) {
+      mi.life -= dt;
+      if (!mi.armed) {
+        mi.armT -= dt;
+        if (mi.armT <= 0) { mi.armed = true; this.fx.push({ t: "sfx", name: "mine_arm", x: mi.x, y: mi.y }); }
+        continue;
+      }
+      if (this.robots.some((r) => !r.dead && Math.hypot(r.x - mi.x, r.y - mi.y) < r.stats.radius + MINE.trigger)) triggered.push(mi);
+    }
+    if (triggered.length) this.detonate(triggered);
+    this.mines = this.mines.filter((mi) => mi.life > 0);
+  }
+
+  /** Explode as minas e, em cadeia, as que estiverem no raio de uma explosão. Dano cai de 100% no centro a 50% na borda. */
+  private detonate(start: Mine[]) {
+    const queue = [...start];
+    const gone = new Set<Mine>();
+    while (queue.length) {
+      const mi = queue.shift()!;
+      if (gone.has(mi)) continue;
+      gone.add(mi);
+      const owner = this.robots[mi.owner];
+      for (const r of this.robots) {
+        if (r.dead) continue;
+        const d = Math.hypot(r.x - mi.x, r.y - mi.y);
+        if (d > mi.radius + r.stats.radius) continue;
+        const k = 1 - 0.5 * clamp(d / mi.radius, 0, 1);
+        this.hitSlot = r === owner ? -1 : mi.slot;
+        this.damage(r, mi.damage * k, "phys", owner, { x: mi.x, y: mi.y });
+        this.hitSlot = -1;
+        // empurrão para longe do centro
+        const a = d > 0.001 ? Math.atan2(r.y - mi.y, r.x - mi.x) : r.angle + Math.PI;
+        const push = (420 * k) / Math.max(0.6, r.stats.totalMass / 70);
+        r.vx += Math.cos(a) * push; r.vy += Math.sin(a) * push;
+      }
+      this.fx.push({ t: "explosion", x: mi.x, y: mi.y, big: true }, { t: "shake", power: 9 });
+      for (const other of this.mines) {
+        if (!gone.has(other) && Math.hypot(other.x - mi.x, other.y - mi.y) <= mi.radius) queue.push(other);
+      }
+    }
+    this.mines = this.mines.filter((mi) => !gone.has(mi));
   }
 
   // ---------- reforços da Carreira (nunca usados no ranking) ----------
@@ -756,7 +851,7 @@ function makeRobot(id: number, build: RobotBuild, x: number, y: number, angle: n
     id, build, stats, x, y, angle, vx: 0, vy: 0,
     hp: stats.hp, energy: 100, burn: 0, stun: 0, flash: 0, hazardCd: 0, ramCd: 0,
     weapons: makeWeapons(build, stats.radius),
-    dead: false, wheelSpin: 0, dmgDealt: 0,
+    dead: false, wheelSpin: 0, dmgDealt: 0, dmgBy: [0, 0, 0],
     speedScale: 1, boostCd: 0, boostT: 0, boostDir: angle, prevBoost: false, revT: 0, uTurn: false, uTurnTarget: 0, uTurnDir: 1, uTurnDone: false,
     repairLeft: stats.hp * REPAIR_CAP, dazed: 0, dazedAge: 0, dazeImmune: 0, regen: 1,
   };

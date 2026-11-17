@@ -15,7 +15,8 @@ export type WeaponKind =
   | "antimissile"
   | "disruptor"
   | "smoke"
-  | "grounding";
+  | "grounding"
+  | "mines";
 
 /** Peças de defesa/suporte: não entram em "atacar com todas as armas". */
 export const SUPPORT_KINDS: ReadonlySet<WeaponKind> = new Set<WeaponKind>(["repair", "shield", "antimissile", "smoke", "grounding"]);
@@ -111,6 +112,8 @@ export const WEAPONS: Weapon[] = [
   { id: "flipper", kind: "flipper", name: "Flipper Hidráulico", desc: "Arremessa o inimigo longe.", mode: "press", damage: 6, range: 46, arc: 0.7, cooldown: 2.4, energy: 25, mass: 16, cost: 900 },
   { id: "drill", kind: "drill", name: "Broca", desc: "Ignora blindagem.", mode: "hold", damage: 13, range: 40, arc: 0.4, cooldown: 0, energy: 16, mass: 14, cost: 1050 },
   { id: "missile", kind: "missile", name: "Lança-mísseis", desc: "Ataque à distância.", mode: "press", damage: 15, range: 900, arc: 0, cooldown: 2.1, energy: 24, mass: 15, cost: 1200 },
+  // range = raio da explosão; power = distância do arremesso (docs/specs/lanca-minas.md)
+  { id: "mines", kind: "mines", name: "Lança-minas", desc: "Solta minas que armam em 0,8 s e explodem em quem passar por cima, inclusive você. Até 3 no chão.", mode: "press", damage: 28, power: 70, range: 75, arc: 0, cooldown: 2.5, energy: 25, mass: 13, cost: 1150 },
   // defesa e suporte (ocupam slot como as armas)
   { id: "repair", kind: "repair", name: "Kit de Reparo", desc: "Segure para consertar a vida e a arma mais danificada. Anda devagar enquanto conserta; até 35% da vida por luta.", mode: "hold", damage: 0, power: 14, range: 0, arc: 0, cooldown: 0, energy: 22, mass: 12, cost: 800 },
   { id: "shield", kind: "shield", name: "Escudo", desc: "Segure para bloquear 75% do dano físico vindo do lado dele. Deixa o robô mais lento.", mode: "hold", damage: 0, power: 0.75, range: 0, arc: 0.61, cooldown: 0, energy: 15, mass: 16, cost: 950 },
@@ -317,29 +320,45 @@ export function opponentWithLevels(o: Opponent, stage: number, wins = 0): RobotB
   return { ...b, levels };
 }
 
-/** Robô sorteado (luta rápida). `allowed`: só usa estas peças (ex.: as liberadas na Carreira). */
+/** Robô sorteado (Arena livre). `allowed`: só usa estas peças (ex.: as liberadas na Carreira). Sempre dentro do peso. */
 export function randomBuild(seed = Math.random(), allowed?: ReadonlySet<string>): RobotBuild {
   const pick = <T,>(arr: T[], r: number) => arr[Math.floor(r * arr.length) % arr.length];
   const ok = (id: string) => !allowed || allowed.has(id);
   const rnd = mulberry(Math.floor(seed * 1e9));
-  const chassis = pick(CHASSIS.filter((c) => ok(c.id)), rnd());
-  const weapons: string[] = [];
+  const names = ["Trator", "Picadinho", "Rebimboca", "Parafusão", "Curto-Circuito", "Bigorna", "Torradeira", "Moedor"];
+  const name = pick(names, rnd());
+  const color = pick(ROBOT_COLORS, rnd());
   const attack = WEAPONS.filter((w) => !isSupport(w.kind) && ok(w.id)).map((w) => w.id);
   const pool = WEAPONS.filter((w) => ok(w.id)).map((w) => w.id);
-  for (let i = 0; i < chassis.slots; i++) {
-    // a primeira é sempre de ataque: robô só com defesa não luta
-    const w = pick(i === 0 ? attack : pool, rnd());
-    if (!weapons.includes(w)) weapons.push(w);
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const chassis = pick(CHASSIS.filter((c) => ok(c.id)), rnd());
+    const weapons: string[] = [];
+    for (let i = 0; i < chassis.slots; i++) {
+      // a primeira é sempre de ataque: robô só com defesa não luta
+      const w = pick(i === 0 ? attack : pool, rnd());
+      if (!weapons.includes(w)) weapons.push(w);
+    }
+    const b: RobotBuild = { name, color, chassis: chassis.id, drive: pick(DRIVES.filter((d) => ok(d.id)), rnd()).id, armor: pick(ARMORS.filter((a) => ok(a.id)), rnd()).id, weapons };
+    // pesado demais: tira armas do fim (a de ataque fica) antes de sortear outro robô
+    while (buildStats(b).overweight && b.weapons.length > 1) b.weapons = b.weapons.slice(0, -1);
+    if (!validateBuild(b)) return b;
   }
-  const names = ["Trator", "Picadinho", "Rebimboca", "Parafusão", "Curto-Circuito", "Bigorna", "Torradeira", "Moedor"];
-  return {
-    name: pick(names, rnd()),
-    color: pick(ROBOT_COLORS, rnd()),
-    chassis: chassis.id,
-    drive: pick(DRIVES.filter((d) => ok(d.id)), rnd()).id,
-    armor: pick(ARMORS.filter((a) => ok(a.id)), rnd()).id,
-    weapons,
-  };
+  return { name, color, chassis: "striker", drive: "wheels", armor: "steel", weapons: ["saw"] };
+}
+
+/** Nível médio das peças equipadas (1 a MAX_LEVEL). */
+export function avgLevel(b: RobotBuild): number {
+  const ids = [b.chassis, b.drive, b.armor, ...b.weapons.filter(Boolean)];
+  return ids.reduce((s, id) => s + levelOf(b, id), 0) / ids.length;
+}
+
+/** Peças no nível médio `avg`: cada uma arredonda para cima ou para baixo por sorteio. */
+export function withAvgLevel(b: RobotBuild, avg: number, rnd: () => number): RobotBuild {
+  const a = Math.max(1, Math.min(MAX_LEVEL, avg));
+  const base = Math.floor(a), frac = a - base;
+  const levels: Record<string, number> = {};
+  for (const id of [b.chassis, b.drive, b.armor, ...b.weapons.filter(Boolean)]) levels[id] = Math.min(MAX_LEVEL, base + (rnd() < frac ? 1 : 0));
+  return { ...b, levels };
 }
 
 export function mulberry(a: number) {

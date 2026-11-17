@@ -38,6 +38,7 @@ export const UNLOCKS: readonly { stage: number; part: string }[] = [
   { stage: 38, part: "disruptor" },
   { stage: 40, part: "tita" },
   { stage: 42, part: "hammer" },
+  { stage: 44, part: "mines" },
 ];
 
 /** Peças liberadas depois de vencer a fase `stage` (inclui as iniciais). */

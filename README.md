@@ -21,15 +21,16 @@ O robô lê as regras **de cima para baixo, 60 vezes por segundo**:
 - ataques e turbo de **todas** as regras válidas são somados;
 - uma regra sem condição vale sempre e serve de plano padrão.
 
-**28 sensores** (distância, ângulo e lado do inimigo, vida, energia, parede, espinho/fogo, linha de visão, alcance e integridade de cada arma, míssil vindo, inimigo com escudo, "estou desnorteado"…) e **13 ações** (ir até, fugir, circular, manter distância, sair do perigo, mirar com a frente ou com uma arma específica, atacar, turbo, consertar, ligar escudo, soltar fumaça…).
+**29 sensores** (distância, ângulo e lado do inimigo, vida, energia, parede, espinho/fogo, linha de visão, alcance e integridade de cada arma, míssil vindo, mina no chão, inimigo com escudo, "estou desnorteado"…) e **13 ações** (ir até, fugir, circular, manter distância, sair do perigo, mirar com a frente ou com uma arma específica, atacar, turbo, consertar, ligar escudo, soltar fumaça…).
 
 ## Montagem: armas em qualquer lado e defesas
 
 ![Garagem com armas e defesas, cada slot com o seu lado](docs/garagem.png)
 
-- **14 peças de slot:** 8 de ataque (serra, lança-chamas, bobina, espinhos, martelo, flipper, broca, mísseis) e 6 de defesa ou suporte (Kit de Reparo, Escudo, Antimíssil, Pulso Desnorteador, Fumaça, Aterramento). Defesa ocupa slot de arma, e essa troca é a estratégia.
+- **15 peças de slot:** 9 de ataque (serra, lança-chamas, bobina, espinhos, martelo, flipper, broca, mísseis, **lança-minas**) e 6 de defesa ou suporte (Kit de Reparo, Escudo, Antimíssil, Pulso Desnorteador, Fumaça, Aterramento). Defesa ocupa slot de arma, e essa troca é a estratégia.
 - **Cada slot tem um lado:** frente, esquerda, direita ou trás. A mira, o alcance, o flipper, os mísseis e os espinhos usam o ângulo do robô mais o ângulo do lado. Com tudo na frente, as posições são idênticas às de antes, então as lutas antigas não mudam.
 - **Armas quebram:** 40% do dano físico vai também para a arma do lado do golpe. Em 0% ela para de funcionar até ser consertada.
+- **Lança-minas:** solta até 3 minas no chão. Elas armam em 0,8 s e explodem em quem passar por cima, **inclusive o dono**. Uma explosão detona as minas vizinhas em cadeia, e o míssil também detona as que estiverem no alcance. A IA e o cérebro em blocos enxergam as minas (sensor novo) e desviam das armadas.
 - **Contras explícitos:** o escudo bloqueia 75% num arco, o antimíssil derruba mísseis, a fumaça corta a linha de visão (e o míssil perde o alvo), e o aterramento reduz a paralisia do choque e do desnorteio.
 
 ## Carreira: fases geradas por fórmula
@@ -40,8 +41,9 @@ O robô lê as regras **de cima para baixo, 60 vezes por segundo**:
 
 - A dificuldade da IA sobe rápido e desacelera. O nível das peças do inimigo sobe 1 a cada 13 fases.
 - O inimigo só usa peças já liberadas **mais a peça que a fase vai liberar**: o jogador vê a peça em ação, vence e ganha a peça.
-- Chefe a cada 10 fases, estrelas de 1 a 3 por fase, e o Martelo liberado só na fase 42.
-- **Fórmula congelada por teste:** um hash das fases 1 a 200 quebra o teste se alguém mudar o gerador sem subir a versão.
+- Chefe a cada 10 fases, estrelas de 1 a 3 por fase, o Martelo liberado na fase 42 e o Lança-minas na 44.
+- **Fórmula congelada por teste:** um hash das fases 1 a 200 quebra o teste se alguém mudar o gerador sem subir a versão. Peça nova no fim da lista de liberações só muda as fases a partir dela, e um segundo hash garante que as fases 1 a 43 continuam idênticas.
+- **Arena livre:** fora da Carreira, o adversário sorteado acompanha o nível médio das peças do jogador (`free-arena.ts`), e a vitória rende sucata proporcional.
 - **Economia simulada:** `examples/carreira-sim.ts` joga as fases com um jogador que não paga, que compra e melhora peças com a sucata que ganha. Assim dá para conferir que toda fase é vencível sem pagar.
 - **Reforços pagos** (`boosts.ts`): blindagem extra, bateria, sabotagem, reparo instantâneo, pulso congelante, ataque orbital e "Continuar". Só valem na Carreira, nunca no ranking.
 
@@ -55,10 +57,12 @@ src/
   ai.ts            IA dos adversários, parametrizada por dificuldade (0..1)
   brain-blocks.ts  cérebro programável: sensores, ações, interpretador, import/export
   ranking.ts       categorias e desafios do ranking de cérebros (versão do motor por temporada)
+  free-arena.ts    adversário sorteado da arena livre, no nível do jogador
   story.ts         Carreira: gerador de fases, ordem das peças liberadas, estrelas, migração de save
   boosts.ts        catálogo e preços dos reforços da Carreira
-tests/             106 testes: lados das armas, defesas, desnorteio, determinismo, balanço,
-                   Carreira (fórmula congelada), reforços, ranking, arenas, tração, cérebro
+tests/             139 testes: lados das armas, defesas, minas, desnorteio, determinismo, balanço,
+                   Carreira (fórmula congelada), arena livre, reforços, ranking, arenas, tração,
+                   cérebro e modelos prontos
 examples/
   duel.ts          duelo sem tela no terminal
   carreira-sim.ts  simulação da economia da Carreira
@@ -79,7 +83,7 @@ Requer [Bun](https://bun.sh).
 
 ```bash
 bun install
-bun test                               # 106 testes
+bun test                               # 139 testes
 bun run duel                           # Lutador x Marreta na arena clássica
 bun examples/duel.ts Toureiro 3 coliseu
 bun examples/carreira-sim.ts 60 0.6    # 60 fases da Carreira, jogador que não paga
@@ -98,7 +102,7 @@ t=20s  Lutador    █████░░░░░░░░░░░░░░░  
 ```
 
 Parâmetros: `bun examples/duel.ts [modelo] [oponente 0-5] [arena]`
-Modelos: `Lutador`, `Atirador`, `Toureiro`. Arenas: `classica`, `octogono`, `coliseu`, `cruz`, `fabrica`, `corredor`.
+Modelos: `Lutador`, `Atirador`, `Toureiro`, `Guardião`, `Traseiro`. Arenas: `classica`, `octogono`, `coliseu`, `cruz`, `fabrica`, `corredor`.
 
 ## O jogo completo
 
@@ -106,11 +110,11 @@ Além deste motor, o Robot Warriors em produção tem:
 
 | Parte | Stack |
 |---|---|
-| Front-end | Next.js 16, React 19, PixiJS 8 (render vetorial e partículas), PWA offline-first |
+| Front-end | Next.js 16, React 19, PixiJS 8, PWA offline-first. Os robôs são renderizados em 3D no Blender (vista de cima, camadas pintáveis, inclinação nas curvas) e a câmera dá zoom automático conforme a distância dos robôs |
 | Áudio | Web Audio API sintetizado em tempo real: som 3D (HRTF), oclusão por parede, reverberação por arena, Doppler |
 | Backend | Rotas de API do Next.js, Prisma 7, Postgres (Neon), Better Auth |
-| Pagamentos | Compra de créditos via Pix (Asaas), webhooks, livro-razão de créditos, reconciliação por cron e reforços cobrados no servidor sem cobrança dupla |
-| Economia | Duas moedas: sucata (ganha jogando, no navegador) e créditos (comprados, no servidor) |
+| Pagamentos | Compra de créditos via Pix e cartão (Asaas), webhooks, livro-razão de créditos, reconciliação por cron e reforços cobrados no servidor sem cobrança dupla |
+| Economia | Duas moedas: sucata (ganha jogando, no navegador) e créditos (comprados, no servidor). Programa de indicação: quem indica ganha 10% do que o indicado gastar, em créditos, com carência e estorno em caso de reembolso |
 | Ranking | Ranking de cérebros por arena e por adversário, com validação no servidor e temporadas |
 | Infra | Vercel, git flow com ambiente `develop` e deploy de preview por PR, cada um com uma branch própria do banco |
 
