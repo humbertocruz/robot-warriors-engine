@@ -10,6 +10,18 @@
 
 ---
 
+
+## Atualização do jogo — novembro de 2026
+
+A versão publicada do [Robot Warriors](https://www.robotwarriors.app) evoluiu além do snapshot de código deste repositório. O jogo principal agora inclui:
+
+- **Firmware modular** de direção, ataque e defesa, com níveis de inteligência e orçamento de processamento (CPU).
+- **Arenas dinâmicas** com minas, zonas elétricas, fossos, campos temporais, portais, paredes móveis e estações de suporte.
+- **Navegação mais segura** para robôs autônomos, incluindo avaliação de trajetória, impulso e desvios diante de obstáculos e fossos.
+- **Novos testes** para hazards, firmware, fuga, desvios, progressão e encerramento de partidas.
+
+> **Transparência:** este repositório é uma vitrine independente, **não um espelho automático** do código privado de produção. As funcionalidades acima descrevem o jogo atual; o código correspondente ainda precisa ser selecionado, adaptado e testado antes de ser publicado aqui. Os exemplos e testes existentes neste repositório continuam representando seu snapshot próprio. Nenhum backend, credencial ou integração de pagamentos faz parte desta vitrine.
+
 ## A ideia
 
 No Robot Warriors você não controla o robô na mão: você **programa o cérebro dele** com regras visuais do tipo *SE … ENTÃO …*, e ele luta sozinho contra outros robôs (IA contra IA).
